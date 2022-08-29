@@ -1,0 +1,8 @@
+shutil
+natsort
+tqdm
+torch
+torchvision
+opencv-python
+catalyst
+sklearn
