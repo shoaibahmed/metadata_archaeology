@@ -19,7 +19,8 @@ Similarly, memorization scores can also be downloaded from the official website:
   title={Metadata Archaeology: Unearthing Data Subsets by Leveraging Training Dynamics},
   author={Siddiqui, Shoaib Ahmed and Rajkumar, Nitarshan and Maharaj, Tegan and Krueger, David and Hooker, Sara},
   journal={arXiv preprint},
-  year={2022}
+  year={2022},
+  url={https://arxiv.org/abs/2209.10015}
 }
 ```
 
