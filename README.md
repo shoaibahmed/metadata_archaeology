@@ -1,6 +1,6 @@
 # PyTorch implementation of Metadata Archaeology
 
-A PyTorch implementation of the code for the paper on Metadata Archaeology.
+A PyTorch implementation of the code for the paper on [Metadata Archaeology](https://arxiv.org/abs/2209.10015).
 
 ## Execution
 
