@@ -12,6 +12,17 @@ We use consistency scores by default. Consistency scores can be downloaded from 
 
 Similarly, memorization scores can also be downloaded from the official website: ```https://pluskid.github.io/influence-memorization/```
 
+## Surfaced Examples
+
+Surfaced examples can be accessed through [***Google Drive***](https://drive.google.com/drive/folders/1TXGEHBNxcRUFm-qR-I2241IOgnAmqcVR).
+Also checkout our [***webpage***](https://metadata-archaeology.github.io/) for more details.
+
+## Loss Trajectories
+
+As loss trajectories themselves as of great interest, the computed loss trajectories on CIFAR-10, CIFAR-100 and ImageNet are directly available for download through 
+[***Google Drive***](https://drive.google.com/drive/folders/1Hds32eyIuGSJd1e6ZndC6OEcwfFWz4vK?usp=share_link).
+Please refer to the main script ```metadata_archaeology.py``` for details regarding how to load these files.
+
 ## Citation
 
 ```
