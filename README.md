@@ -35,12 +35,12 @@ Please refer to the main script ```metadata_archaeology.py``` for details regard
 }
 ```
 
-## Issues/Feedback:
+## Issues/Feedback
 
 In case of any issues, feel free to drop me an email or open an issue on the repository.
 
 Email: **msas3@cam.ac.uk**
 
-## License:
+## License
 
 MIT
