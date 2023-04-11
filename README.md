@@ -1,6 +1,8 @@
-# Metadata Archaeology
+# Metadata Archaeology [ICLR'23 Spotlight]
 
-A PyTorch implementation for the paper [***Metadata Archaeology: Unearthing Data Subsets by Leveraging Training Dynamics***](https://arxiv.org/abs/2209.10015).
+A PyTorch implementation for the ***ICLR'23*** paper [***Metadata Archaeology: Unearthing Data Subsets by Leveraging Training Dynamics***](https://arxiv.org/abs/2209.10015).
+
+Check the [***OpenReview***](https://openreview.net/forum?id=PvLnIaJbt9) page for detailed discussions on the paper.
 
 ## Execution
 
