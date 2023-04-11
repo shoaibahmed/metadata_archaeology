@@ -1315,15 +1315,12 @@ for val_included in [True, False]:
             y = epoch_scores[k]
             x = np.arange(len(y))
             y_norm = [(float(i) / normalizers[k]) * 100. for i in y]
-            # line = plt.plot(x, y_norm, linewidth=2., marker=marker_list[idx % len(marker_list)],
-            #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
             line = plt.plot(x_vals, y_norm, linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
                             alpha=alpha, label=label_map_dict[k])
             line[0].set_color(marker_colors[idx % len(marker_colors)])
             line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
         plt.xlabel("Number of epochs", fontsize=font_size)
-        # plt.ylabel(f"Fraction of examples learned{'at any point during training' if iden == 1 else ''} (%)", fontsize=font_size)
         plt.ylabel(f"Fraction of examples learned (%)", fontsize=font_size)
         if include_plot_title:
             plt.title(f"Learning dynamics computed for ResNet-50 ({dataset_name.upper()})", fontsize=font_size)
