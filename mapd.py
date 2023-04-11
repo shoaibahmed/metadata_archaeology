@@ -137,7 +137,7 @@ if main_proc:
 # In[ ]:
 
 
-data_dir = "../data/"
+data_dir = "./data/"
 assert os.path.exists(data_dir)
 
 
@@ -700,7 +700,7 @@ print(model)
 
 
 # Convert to a distributed model
-model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True, use_torch_ddp=True)
+model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True)
 
 
 # In[ ]:
@@ -1887,7 +1887,7 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
 # In[ ]:
 
 
-surface_examples = False
+surface_examples = True
 if surface_examples:
     surface_dir = os.path.join(experiment_output_dir, f"./surfaced_examples_{dataset}/")
     if main_proc:
