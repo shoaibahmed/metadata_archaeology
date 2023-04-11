@@ -2,7 +2,21 @@ import pickle
 from collections import OrderedDict
 
 import torch
-import apex.parallel
+
+
+def setup_for_distributed(is_master):
+    """
+    This function disables printing when not in master process
+    """
+    import builtins as __builtin__
+    builtin_print = __builtin__.print
+
+    def print(*args, **kwargs):
+        force = kwargs.pop('force', False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
+
+    __builtin__.print = print
 
 
 def is_main_proc(local_rank=None, shared_fs=True):
@@ -13,13 +27,6 @@ def is_main_proc(local_rank=None, shared_fs=True):
 
 def get_world_size():
     return torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
-
-
-def dist_print(*msg, main_proc=None):
-    if main_proc is None:
-        main_proc = is_main_proc()
-    if main_proc:
-        print(*msg)
 
 
 def wait_for_other_procs():
@@ -53,17 +60,6 @@ def reduce_tensor(tensor, average=False):
     if average:
         rt /= world_size
     return rt
-
-
-# def gather_tensor(tensor):
-#     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-#         return tensor
-#     tensor_device = tensor.device
-#     tensor = tensor.cuda()
-#     tensor_list = [torch.zeros_like(tensor).cuda() for _ in range(torch.distributed.get_world_size())]
-#     torch.distributed.all_gather(tensor_list, tensor)
-#     tensor = torch.cat(tensor_list, dim=0).to(tensor_device)
-#     return tensor
 
 
 def gather_tensor(data):
@@ -128,20 +124,12 @@ def convert_state_dict(state_dict, require_module=None):
     return new_state_dict
 
 
-def convert_to_distributed(model, local_rank, sync_bn=False, use_torch_ddp=True):
-    # Convert the model to dist
-    dist_print(f"Using {'Torch' if use_torch_ddp else 'APEX'} DDP...")
+def convert_to_distributed(model, local_rank, sync_bn=False):
+    print(f"Using DDP...")
     if torch.distributed.is_initialized():
         if sync_bn:
-            dist_print("Using synced BN!")
-            if use_torch_ddp:
-                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-            else:
-                model = apex.parallel.convert_syncbn_model(model)
-
-        dist_print("Wrapping the model into DDP!")
-        if use_torch_ddp:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
-        else:
-            model = apex.parallel.DistributedDataParallel(model, delay_allreduce=True)
+            print("Using synced BN!")
+            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        print("Wrapping the model into DDP!")
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
     return model

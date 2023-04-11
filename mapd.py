@@ -1,13 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""
-PyTorch code for surfacing examples from the dataset.
-Converted from other internal code.
-
-Paper: Metadata Archaeology: Unearthing Data Subsets by Leveraging Training Dynamics
-Author: Shoaib Ahmed Siddiqui (msas3@cam.ac.uk)
-"""
+# ## Inserting probes into the model for inspecting model phase
 
 # In[ ]:
 
@@ -15,32 +9,31 @@ Author: Shoaib Ahmed Siddiqui (msas3@cam.ac.uk)
 import os
 import sys
 import copy
+import urllib
 import shutil
 import pickle
 import random
-import urllib
 import natsort
 import warnings
 import itertools
 from tqdm import tqdm
 
+import cv2
+import numpy as np
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+import sklearn.neighbors
+from sklearn.metrics import confusion_matrix
+
 import torch
 from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
 from torchvision import transforms, models
 
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-
-import PIL
-import cv2
-
 import dist_utils
 
 from catalyst.data import DistributedSamplerWrapper
-
-import sklearn.neighbors
-from sklearn.metrics import confusion_matrix
 
 
 # In[ ]:
@@ -65,13 +58,11 @@ font_size = 16
 # In[ ]:
 
 
-if len(sys.argv) != 3:
-    print(f"Usage: {sys.argv[0]} <Dataset: cifar10/cifar100/imagenet> <Use OOD: T/F>")
+if len(sys.argv) != 2:
+    print(f"Usage: {sys.argv[0]} <Dataset: cifar10/cifar100/imagenet>")
+    exit()
 
 dataset = sys.argv[1]
-use_ood = sys.argv[2].lower()
-assert use_ood in ["t", "f", "true", "false"], use_ood
-use_ood = use_ood in ["t", "true"]
 assert dataset in ["cifar10", "cifar100", "imagenet"]
 
 
@@ -79,22 +70,18 @@ assert dataset in ["cifar10", "cifar100", "imagenet"]
 
 
 # Essential config
-fraction_of_noisy_labels = 0.0
 log_predictions = True
-use_ood_random_inputs = use_ood
 distributed = True if dataset == "imagenet" else False
 num_train_probes = 250
 num_val_probes = 250
 use_val_probes_for_training = True
 num_example_probes = num_train_probes + num_val_probes
-experiment_output_dir = f"./surfaced_examples_{dataset}{'_wo_ood_random_inputs' if not use_ood_random_inputs else ''}"
+experiment_output_dir = f"./mapd_exp01_{dataset}"
 num_workers = 8
-surface_examples = False
 feat_dim = 2048  # Feature dimensions for ResNet-50
 dataset_name = dataset
 
 print("Dataset:", dataset)
-print("Using OOD:", use_ood_random_inputs)
 print("Distributed training:", distributed)
 
 
@@ -129,25 +116,7 @@ print("Is main proc?", main_proc)
 # In[ ]:
 
 
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
-
-    __builtin__.print = print
-
-
-# In[ ]:
-
-
-setup_for_distributed(main_proc)
+dist_utils.setup_for_distributed(main_proc)
 warnings.filterwarnings("ignore", "Warning: Leaking Caffe2 thread-pool after fork. (function pthreadpool)", UserWarning)
 
 
@@ -325,6 +294,7 @@ if "cifar" in dataset:
     # data_dir = f"/mnt/sas/Datasets/{dataset}/"
     data_dir = f"/netscratch/siddiqui/Datasets/{dataset}/"
     train_set = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(train_transform))
+    train_set_wo_aug = DatasetCls(data_dir, download=True, train=True, transform=transforms.Compose(no_transform))
     test_set = DatasetCls(data_dir, download=True, train=False, transform=transforms.Compose(test_transform))
 else:
     assert dataset == "imagenet"
@@ -338,21 +308,19 @@ else:
         test_transform = [transforms.Resize(256),
                           transforms.CenterCrop(224),
                           transforms.ToTensor()]
-        no_transform = [transforms.Resize((224, 224)),
-                        transforms.ToTensor()]
     else:
         print("Training w/o augmentations...")
         train_transform = [transforms.Resize((224, 224)),
                            transforms.ToTensor()]
         test_transform = [transforms.Resize((224, 224)),
                           transforms.ToTensor()]
-        no_transform = test_transform
+    no_transform = test_transform
 
     # data_dir = "/mnt/sas/Datasets/ilsvrc12/"
     data_dir = "/ds/images/imagenet/"
     train_set = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(train_transform))
-    # train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
-    test_set = ImageFolder(os.path.join(data_dir, "val"), transform=transforms.Compose(test_transform))
+    train_set_wo_aug = ImageFolder(os.path.join(data_dir, "train"), transform=transforms.Compose(no_transform))
+    test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
     
     # Replace train_set.classes with real names
     train_set.original_classes = train_set.classes
@@ -469,18 +437,18 @@ print(dataset, num_classes)
 # In[ ]:
 
 
-probes = {"typical": [], "atypical": [], "random_outputs": [], "random_inputs_outputs": [], "corrupted": []}
+probes = {"typical": [], "atypical": [], "corrupted": [], "random_outputs": []}
 probes.update({"typical_idx": sorted_mem_idx[:num_example_probes], "atypical_idx": sorted_mem_idx[-num_example_probes:]})
 
 
 # In[ ]:
 
 
-probes["typical"] = torch.stack([train_set[i][0] for i in probes["typical_idx"]], dim=0).to(device)
-probes["typical_labels"] = torch.from_numpy(np.array([train_set[i][1] for i in probes["typical_idx"]])).to(device)
+probes["typical"] = torch.stack([train_set_wo_aug[i][0] for i in probes["typical_idx"]], dim=0).to(device)
+probes["typical_labels"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["typical_idx"]])).to(device)
 probes["typical_mem"] = torch.from_numpy(np.array([memorization_values[i] for i in probes["typical_idx"]])).to(device)
-probes["atypical"] = torch.stack([train_set[i][0] for i in probes["atypical_idx"]], dim=0).to(device)
-probes["atypical_labels"] = torch.from_numpy(np.array([train_set[i][1] for i in probes["atypical_idx"]])).to(device)
+probes["atypical"] = torch.stack([train_set_wo_aug[i][0] for i in probes["atypical_idx"]], dim=0).to(device)
+probes["atypical_labels"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["atypical_idx"]])).to(device)
 probes["atypical_mem"] = torch.from_numpy(np.array([memorization_values[i] for i in probes["atypical_idx"]])).to(device)
 print(probes["typical"].shape, probes["atypical"].shape)
 
@@ -492,8 +460,8 @@ print(probes["typical"].shape, probes["atypical"].shape)
 remaining_indices = [i for i in range(len(train_set)) if i not in probes["typical_idx"] and i not in probes["atypical_idx"]]
 new_indices = np.random.choice(remaining_indices, size=num_example_probes, replace=False)
 probes.update({"random_outputs_idx": new_indices})
-probes["random_outputs"] = torch.stack([train_set[i][0] for i in probes["random_outputs_idx"]], dim=0).to(device)
-probes["random_outputs_labels_orig"] = torch.from_numpy(np.array([train_set[i][1] for i in probes["random_outputs_idx"]])).to(device)
+probes["random_outputs"] = torch.stack([train_set_wo_aug[i][0] for i in probes["random_outputs_idx"]], dim=0).to(device)
+probes["random_outputs_labels_orig"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["random_outputs_idx"]])).to(device)
 probes["random_outputs_labels"] = torch.from_numpy(np.random.choice(range(num_classes), size=len(probes["random_outputs_idx"]), replace=True)).to(device)
 num_labels_adjusted = 0
 for i in range(len(probes["random_outputs_labels"])):  # Ensure that the correct labels are not assigned by mistake
@@ -544,135 +512,38 @@ probes.update({"corrupted_idx": new_indices})
 corruption_transform = transforms.Compose([AddGaussianNoise(mean=0.0, std=0.1 if "cifar" in dataset else 0.25), 
                                            ClampRangeTransform()])
 
-probes["corrupted"] = torch.stack([corruption_transform(train_set[i][0]) for i in probes["corrupted_idx"]], dim=0).to(device)
-probes["corrupted_labels"] = torch.from_numpy(np.array([train_set[i][1] for i in probes["corrupted_idx"]])).to(device)
+probes["corrupted"] = torch.stack([corruption_transform(train_set_wo_aug[i][0]) for i in probes["corrupted_idx"]], dim=0).to(device)
+probes["corrupted_labels"] = torch.from_numpy(np.array([train_set_wo_aug[i][1] for i in probes["corrupted_idx"]])).to(device)
 probes["corrupted_mem"] = torch.from_numpy(np.array([-1. for i in probes["corrupted_idx"]])).to(device)
-
-
-if use_ood_random_inputs:
-
-    # In[ ]:
-
-
-    class ConvertToSketch(object):
-        def __init__(self):
-            pass
-        
-        @staticmethod
-        def blend(x, y):
-            return cv2.divide(x, 255 - y, scale=256)
-        
-        def __call__(self, x):
-            assert isinstance(x, np.ndarray)
-            assert len(x.shape) == 3
-            assert x.shape[-1] == 3
-            
-            grayed = cv2.cvtColor(x, cv2.COLOR_RGB2GRAY)
-            inverted = cv2.bitwise_not(grayed)
-            blurred = cv2.GaussianBlur(inverted, (7, 7) if "cifar" in dataset else (21, 21), sigmaX=0, sigmaY=0)
-            sketch_out = ConvertToSketch.blend(grayed, blurred)
-            sketch_out = np.stack([sketch_out, sketch_out, sketch_out], axis=2)
-            return sketch_out
-
-
-    # In[ ]:
-
-
-    class ToNumpyArray(object):
-        def __init__(self):
-            pass
-        
-        def __call__(self, x):
-            if isinstance(x, np.ndarray):
-                return x
-            elif isinstance(x, PIL.Image.Image):
-                return np.array(x)
-            else:
-                raise RuntimeError(f"Input not supported: {type(x)}")
-
-
-    # In[ ]:
-
-
-    # Add OOD examples via sketches
-    remaining_indices = [i for i in range(len(train_set)) if i not in probes["typical_idx"] and i not in probes["atypical_idx"] and i not in probes["random_outputs_idx"] and i not in probes["corrupted_idx"]]
-    new_indices = np.random.choice(remaining_indices, size=num_example_probes, replace=False)
-    probes.update({"out_of_distribution_idx": new_indices})
-
-    if "cifar" in dataset:
-        sketch_transform = transforms.Compose([ConvertToSketch(), transforms.ToTensor()])
-        probes["out_of_distribution"] = torch.stack([sketch_transform(train_set.data[i]) for i in probes["out_of_distribution_idx"]], dim=0).to(device)
-    else:
-        sketch_transform = transforms.Compose([transforms.Resize((224, 224)), ToNumpyArray(), ConvertToSketch(), transforms.ToTensor()])
-        train_set.transform = sketch_transform  # Replace the original transform
-        probes["out_of_distribution"] = torch.stack([train_set[i][0] for i in probes["out_of_distribution_idx"]], dim=0).to(device)
-        train_set.transform = transforms.Compose(train_transform)  # Reattach the original transform
-
-    probes["out_of_distribution_labels"] = torch.from_numpy(np.array([train_set.targets[i] for i in probes["out_of_distribution_idx"]])).to(device)
-    probes["out_of_distribution_mem"] = torch.from_numpy(np.array([-1. for i in probes["out_of_distribution_idx"]])).to(device)
-
-
-# In[ ]:
-
-
-# Add noisy examples
-tensor_shape = probes["typical"].shape
-probes["random_inputs_outputs"] = torch.clip(torch.randn(*tensor_shape), 0., 1.).to(device)
-probes["random_inputs_outputs_labels"] = torch.randint(0, num_classes, (num_example_probes,)).to(device)
-probes["random_inputs_outputs_mem"] = torch.from_numpy(np.array([-1. for i in probes["random_outputs_idx"]])).to(device)
 
 
 # In[ ]:
 
 
 print("Typical examples")
-plot(probes["typical"], probes["typical_labels"], probes["typical_mem"], class_names=train_set.classes, 
-     output_file=f"typical_{dataset}_{rank}.png")
+plot(probes["typical"], probes["typical_labels"], probes["typical_mem"], class_names=train_set.classes, output_file=f"typical_{dataset}_{rank}.png")
 
 
 # In[ ]:
 
 
 print("Atypical examples")
-plot(probes["atypical"], probes["atypical_labels"], probes["atypical_mem"], class_names=train_set.classes, 
-     output_file=f"atypical_{dataset}_{rank}.png")
+plot(probes["atypical"], probes["atypical_labels"], probes["atypical_mem"], class_names=train_set.classes, output_file=f"atypical_{dataset}_{rank}.png")
 
 
 # In[ ]:
 
 
 print("Corrupted examples")
-plot(probes["corrupted"], probes["corrupted_labels"], probes["corrupted_mem"], class_names=train_set.classes, 
-     output_file=f"corrupted_{dataset}_{rank}.png")
+plot(probes["corrupted"], probes["corrupted_labels"], probes["corrupted_mem"], class_names=train_set.classes, output_file=f"corrupted_{dataset}_{rank}.png")
 
 
 # In[ ]:
 
 
 print("Random output examples")
-plot(probes["random_outputs"], probes["random_outputs_labels"], probes["random_outputs_mem"], class_names=train_set.classes, 
-     output_file=f"random_outputs_{dataset}_{rank}.png")
+plot(probes["random_outputs"], probes["random_outputs_labels"], probes["random_outputs_mem"], class_names=train_set.classes, output_file=f"random_outputs_{dataset}_{rank}.png")
 
-
-if use_ood_random_inputs:
-
-    # In[ ]:
-
-
-    print("Out-of-distribution examples")
-    plot(probes["out_of_distribution"], probes["out_of_distribution_labels"], probes["out_of_distribution_mem"], class_names=train_set.classes, 
-         output_file=f"ood_{dataset}_{rank}.png")
-
-
-    # In[ ]:
-
-
-    print("Random input & output examples")
-    plot(probes["random_inputs_outputs"], probes["random_inputs_outputs_labels"], probes["random_inputs_outputs_mem"], class_names=train_set.classes, 
-         output_file=f"random_inputs_outputs_{dataset}_{rank}.png")
-
-
-# ## Train on these examples
 
 # In[ ]:
 
@@ -699,15 +570,10 @@ wd = 0.0001
 
 
 # Remove typical and atypical examples from the dataset -- will train on the probes separately
-if use_ood_random_inputs:
-    discarded_idx = list(probes["typical_idx"]) + list(probes["atypical_idx"]) + list(probes["random_outputs_idx"]) + list(probes["corrupted_idx"]) + list(probes["out_of_distribution_idx"])
-else:
-    discarded_idx = list(probes["typical_idx"]) + list(probes["atypical_idx"]) + list(probes["random_outputs_idx"]) + list(probes["corrupted_idx"])
+discarded_idx = list(probes["typical_idx"]) + list(probes["atypical_idx"]) + list(probes["random_outputs_idx"]) + list(probes["corrupted_idx"])
 train_indices = [i for i in range(len(train_set)) if i not in discarded_idx]
 print("Discarded examples:", len(train_set) - len(train_indices))
 assert len(train_set) - len(train_indices) == len(discarded_idx)
-train_loader = get_loader(train_set, train_indices, batch_size=batch_size)
-test_loader = get_loader(test_set, batch_size=batch_size)
 
 
 # In[ ]:
@@ -728,10 +594,7 @@ class CustomTensorDataset(torch.utils.data.Dataset):
 # In[ ]:
 
 
-if use_ood_random_inputs:
-    probes_to_be_used = ["typical", "atypical", "corrupted", "random_outputs", "out_of_distribution", "random_inputs_outputs"]
-else:
-    probes_to_be_used = ["typical", "atypical", "corrupted", "random_outputs"]
+probes_to_be_used = ["typical", "atypical", "corrupted", "random_outputs"]
 print("Selected probes to be used:", probes_to_be_used)
 val_idx = np.random.choice(range(num_example_probes), size=num_val_probes, replace=False)
 
@@ -819,18 +682,16 @@ val_probe_loader = get_loader(val_probe_dataset, val_probe_indices, batch_size=b
 
 
 print("Curated probe dataset")
-plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0), torch.stack([x[2] for x in probe_dataset], dim=0), 
-     class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png")
+plot(torch.stack([x[0] for x in probe_dataset], dim=0), torch.stack([x[1] for x in probe_dataset], dim=0), torch.stack([x[2] for x in probe_dataset], dim=0), class_names=train_set.classes, output_file=f"probes_dataset_{dataset}.png")
 
 
 # In[ ]:
 
 
 # Create ResNet-50
-model = models.resnet50(pretrained=False)
+model = models.resnet50(pretrained=False, num_classes=num_classes)
 if "cifar" in dataset:  # Change the first and last layer for cifar10/cifar100
     model.conv1 = torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
 model = model.to(device)
 print(model)
 
@@ -864,6 +725,7 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
             loss = criterion(output, target)
         
         loss_values.append(loss.detach().clone())
+        
         assert loss.shape == (len(data),)
         loss = loss.mean()  # Reduction has been disabled -- do explicit reduction
         
@@ -893,7 +755,7 @@ def train(model, device, train_loader, optimizer, criterion, scaler, log_interva
         targets = torch.cat(dist_utils.gather_tensor(torch.cat(targets, dim=0)), dim=0).detach().cpu().numpy()
         loss_values = torch.cat(dist_utils.gather_tensor(torch.cat(loss_values, dim=0)), dim=0).detach().cpu().numpy()
         output_dict = {"ex_idx": example_idx, "preds": predictions, "targets": targets, "loss": loss_values}
-    
+
     return output_dict
 
 
@@ -1016,55 +878,9 @@ criterion = torch.nn.CrossEntropyLoss(reduction='none').to(device)  # reduction=
 # In[ ]:
 
 
-model_params = list(model.parameters())
-optimizer = torch.optim.SGD(model_params, lr=lr, momentum=momentum, weight_decay=wd)
+optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 scaler = torch.cuda.amp.GradScaler()
-
-
-# In[ ]:
-
-
-# Dataset noise parameters
-available_idx = [i for i in range(len(train_set)) if i not in discarded_idx]
-print(f"Total examples in train set: {len(train_set)} | Discarded idx: {len(discarded_idx)} | Available idx: {len(available_idx)}")
-num_noisy_samples = int(len(train_set) * fraction_of_noisy_labels)
-noisy_idx = np.random.choice(available_idx, size=(num_noisy_samples,), replace=False)
-assert len(noisy_idx) == num_noisy_samples
-
-
-# In[ ]:
-
-
-noisy_loader = get_loader(train_set, noisy_idx, batch_size=batch_size)
-non_noisy_idx = [i for i in available_idx if i not in noisy_idx]
-assert len(noisy_idx) + len(non_noisy_idx) == len(available_idx)
-assert len(noisy_idx) + len(non_noisy_idx) + len(discarded_idx) == len(train_set)
-non_noisy_loader = get_loader(train_set, non_noisy_idx, batch_size=batch_size)
-print(f"Noisy loader: {len(noisy_loader) * noisy_loader.batch_size} | Non-noisy loader: {len(non_noisy_loader) * non_noisy_loader.batch_size}")
-
-
-# In[ ]:
-
-
-# Directly change the labels of the original dataset
-train_set_original_targets = copy.deepcopy(train_set.targets)
-for i in noisy_idx:
-    original_target = train_set.targets[i]
-    while True:
-        train_set.targets[i] = np.random.randint(num_classes)
-        if train_set.targets[i] != original_target:
-            break
-
-
-# In[ ]:
-
-
-for i in tqdm(range(len(train_set_original_targets))):
-    if i in noisy_idx:
-        assert train_set_original_targets[i] != train_set.targets[i]
-    else:
-        assert train_set_original_targets[i] == train_set.targets[i]
 
 
 # In[ ]:
@@ -1086,11 +902,10 @@ print("Size of combined dataset:", len(comb_train_set))
 # In[ ]:
 
 
-dataset_probe_identity = ["train_noisy" if i in noisy_idx else "train" for i in range(len(train_set))] + probe_identity
+dataset_probe_identity = ["train" for i in range(len(train_set))] + probe_identity
 if use_val_probes_for_training:
     dataset_probe_identity += val_probe_identity
 assert len(dataset_probe_identity) == len(comb_train_set)
-assert sum([x == "train_noisy" for x in dataset_probe_identity]) == len(noisy_idx)
 
 
 # In[ ]:
@@ -1112,12 +927,15 @@ class IdxDataset(torch.utils.data.Dataset):
 
 # Convert into a dataset which returns indices
 idx_dataset = IdxDataset(comb_train_set)
+
+# Update dataset transform for evaluation | idx dataset -> concate dataset -> actual training dataset
+idx_dataset_wo_aug = copy.deepcopy(idx_dataset)
+idx_dataset_wo_aug.dataset.datasets[0].transform = transforms.Compose(no_transform)
+
 new_idx_loader = get_loader(idx_dataset, comb_train_indices, batch_size=batch_size)
+new_idx_loader_wo_aug = get_loader(idx_dataset_wo_aug, comb_train_indices, batch_size=batch_size)
 train_idx_loader = get_loader(IdxDataset(train_set), train_indices, batch_size=batch_size)
 test_idx_loader = get_loader(IdxDataset(test_set), batch_size=batch_size)
-
-noisy_idx_loader = get_loader(IdxDataset(train_set), noisy_idx, batch_size=batch_size)
-non_noisy_idx_loader = get_loader(IdxDataset(train_set), non_noisy_idx, batch_size=batch_size)
 
 
 # In[ ]:
@@ -1131,39 +949,9 @@ num_queue_plots = num_plots_per_row * plot_rows
 # In[ ]:
 
 
-def plot_probe_ex(x, y, probs, output_file=None):
-    plot_size = 3
-    fig, ax = plt.subplots(plot_rows, num_plots_per_row, figsize=(plot_size * num_plots_per_row, plot_size * plot_rows), sharex=True, sharey=True)
-
-    for idx in range(len(x)):
-        ax[idx // num_plots_per_row, idx % num_plots_per_row].imshow(x[idx])
-        # ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(y[idx])
-        ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(f"{y[idx]} (PD: {probs[idx]:.3f})")
-
-        if idx == plot_rows * num_plots_per_row - 1:
-            break
-
-    for a in ax.ravel():
-        a.set_axis_off()
-
-        # Turn off tick labels
-        a.set_yticklabels([])
-        a.set_xticklabels([])
-
-    fig.tight_layout()
-    if output_file is not None:
-        fig.savefig(output_file, bbox_inches=0.0, pad_inches=0)
-    plt.close()
-
-
-# In[ ]:
-
-
-model_file = os.path.join(experiment_output_dir, f"models_{dataset}", f"model_{dataset}_noisy_{fraction_of_noisy_labels}p_dynamics.pth")
-data_file = os.path.join(experiment_output_dir, f"stats_{dataset}_noisy_{fraction_of_noisy_labels}p_dynamics.pkl")
-data_statistics_file = os.path.join(experiment_output_dir, f"stats_{dataset}_noisy_{fraction_of_noisy_labels}p_data_statistics.pkl")
-surface_dir = os.path.join(experiment_output_dir, f"./surfaced_examples_{dataset}/")
-conf_mat_dir = os.path.join(experiment_output_dir, f"./confusion_matrix_{dataset}/")
+model_file = os.path.join(experiment_output_dir, f"models_{dataset}", f"model_{dataset}_dynamics.pth")
+data_file = os.path.join(experiment_output_dir, f"stats_{dataset}_dynamics.pkl")
+data_statistics_file = os.path.join(experiment_output_dir, f"stats_{dataset}_data_statistics.pkl")
 
 
 # In[ ]:
@@ -1176,35 +964,25 @@ if main_proc and not os.path.exists(model_dir):
 
 # In[ ]:
 
-if use_ood_random_inputs:
-    ref_probe_classes = ["typical", "atypical", "corrupted", "random_outputs", "out_of_distribution", "random_inputs_outputs"]
-else:
-    ref_probe_classes = ["typical", "atypical", "corrupted", "random_outputs"]
+ref_probe_classes = ["typical", "atypical", "corrupted", "random_outputs"]
 
 
 # In[ ]:
 
 
 label_map_dict = {"typical": "Typical", "typical_val": "Typical [Val]", "atypical": "Atypical", "atypical_val": "Atypical [Val]", 
-                  "corrupted": "Corrupted", "corrupted_val": "Corrupted [Val]", 
-                  "out_of_distribution": "OOD", "out_of_distribution_val": "OOD [Val]", 
-                  "random_outputs": "Random Outputs", "random_outputs_val": "Random Outputs [Val]", 
-                  "random_inputs_outputs": "Random Inputs", "random_inputs_outputs_val": "Random Inputs [Val]", 
-                  "train": "Train", "train_noisy": "Train (Mislabeled)", "train_non_noisy": "Train (Clean)", "test": "Test"}
+                  "corrupted": "Corrupted", "corrupted_val": "Corrupted [Val]","random_outputs": "Random Outputs", 
+                  "random_outputs_val": "Random Outputs [Val]", "train": "Train", "test": "Test"}
 
 
 # In[ ]:
 
 
 if not os.path.exists(model_file):
-    statistics = {"train": [], "train_noisy": [], "train_non_noisy": [], "test": []}
+    statistics = {"train": [], "test": []}
     statistics.update({k: [] for k in ref_probe_classes})
     statistics.update({f"{k}_val": [] for k in ref_probe_classes})  # Add keys for validation probes
-    
     inv_probe_map = {i: v for i, v in enumerate(ref_probe_classes)}
-    
-    surface_epoch = 5
-    contains_noisy = fraction_of_noisy_labels > 0
     
     predictions = {}
     
@@ -1215,44 +993,19 @@ if not os.path.exists(model_file):
         print("Stats for epoch #", epoch+1)
         if log_predictions:
             # Don't use train_idx_loader here -- also assumes that probes are include for later evaluation
-            train_stats, train_preds = test(model, device, criterion, new_idx_loader, 
-                                            set_name="Train", log_predictions=log_predictions)
-            
-            if contains_noisy:  # Collect noisy stats
-                train_non_noisy_stats, train_non_noisy_preds = test(model, device, criterion, non_noisy_idx_loader, 
-                                                                    set_name="Train (non-noisy)", log_predictions=log_predictions)
-                train_noisy_stats, train_noisy_preds = test(model, device, criterion, noisy_idx_loader, 
-                                                            set_name="Train (noisy)", log_predictions=log_predictions)
-        
+            train_stats, train_preds = test(model, device, criterion, new_idx_loader_wo_aug, set_name="Train", log_predictions=log_predictions)
         test_stats, test_preds = test(model, device, criterion, test_idx_loader, log_predictions=log_predictions)
         
         # Collect probe statistics
-        typical_stats, typical_preds = test_tensor(model, device, criterion, probes["typical"], probes["typical_labels"], 
-                                                   msg="Typical probe", log_predictions=log_predictions)
-        val_typical_stats, val_typical_preds = test_tensor(model, device, criterion, val_probes["typical"], val_probes["typical_labels"], 
-                                                           msg="Typical probe (val)", log_predictions=log_predictions)
-        atypical_stats, atypical_preds = test_tensor(model, device, criterion, probes["atypical"], probes["atypical_labels"], 
-                                                     msg="Atypical probe", log_predictions=log_predictions)
-        val_atypical_stats, val_atypical_preds = test_tensor(model, device, criterion, val_probes["atypical"], val_probes["atypical_labels"], 
-                                                             msg="Atypical probe (val)", log_predictions=log_predictions)
-        corrupted_stats, corrupted_preds = test_tensor(model, device, criterion, probes["corrupted"], probes["corrupted_labels"], 
-                                                       msg="Corrupted probe", log_predictions=log_predictions)
-        val_corrupted_stats, val_corrupted_preds = test_tensor(model, device, criterion, val_probes["corrupted"], val_probes["corrupted_labels"], 
-                                                               msg="Corrupted probe (val)", log_predictions=log_predictions)
-        random_outputs_stats, random_outputs_preds = test_tensor(model, device, criterion, probes["random_outputs"], probes["random_outputs_labels"], 
-                                                                 msg="Random outputs probe", log_predictions=log_predictions)
-        val_random_outputs_stats, val_random_outputs_preds = test_tensor(model, device, criterion, val_probes["random_outputs"], val_probes["random_outputs_labels"], 
-                                                                         msg="Random outputs probe (val)", log_predictions=log_predictions)
-        if use_ood_random_inputs:
-            ood_stats, ood_preds = test_tensor(model, device, criterion, probes["out_of_distribution"], probes["out_of_distribution_labels"], 
-                                               msg="Out-of-distribution probe", log_predictions=log_predictions)
-            val_ood_stats, val_ood_preds = test_tensor(model, device, criterion, val_probes["out_of_distribution"], val_probes["out_of_distribution_labels"], 
-                                                       msg="Out-of-distribution probe (val)", log_predictions=log_predictions)
-            random_inputs_outputs_stats, random_inputs_outputs_preds = test_tensor(model, device, criterion, probes["random_inputs_outputs"], probes["random_inputs_outputs_labels"], 
-                                                                                   msg="Random inputs & outputs probe", log_predictions=log_predictions)
-            val_random_inputs_outputs_stats, val_random_inputs_outputs_preds = test_tensor(model, device, criterion, val_probes["random_inputs_outputs"], val_probes["random_inputs_outputs_labels"], 
-                                                                                           msg="Random inputs & outputs probe (val)", log_predictions=log_predictions)
-
+        typical_stats, typical_preds = test_tensor(model, device, criterion, probes["typical"], probes["typical_labels"], msg="Typical probe", log_predictions=log_predictions)
+        val_typical_stats, val_typical_preds = test_tensor(model, device, criterion, val_probes["typical"], val_probes["typical_labels"], msg="Typical probe (val)", log_predictions=log_predictions)
+        atypical_stats, atypical_preds = test_tensor(model, device, criterion, probes["atypical"], probes["atypical_labels"], msg="Atypical probe", log_predictions=log_predictions)
+        val_atypical_stats, val_atypical_preds = test_tensor(model, device, criterion, val_probes["atypical"], val_probes["atypical_labels"], msg="Atypical probe (val)", log_predictions=log_predictions)
+        corrupted_stats, corrupted_preds = test_tensor(model, device, criterion, probes["corrupted"], probes["corrupted_labels"], msg="Corrupted probe", log_predictions=log_predictions)
+        val_corrupted_stats, val_corrupted_preds = test_tensor(model, device, criterion, val_probes["corrupted"], val_probes["corrupted_labels"], msg="Corrupted probe (val)", log_predictions=log_predictions)
+        random_outputs_stats, random_outputs_preds = test_tensor(model, device, criterion, probes["random_outputs"], probes["random_outputs_labels"], msg="Random outputs probe", log_predictions=log_predictions)
+        val_random_outputs_stats, val_random_outputs_preds = test_tensor(model, device, criterion, val_probes["random_outputs"], val_probes["random_outputs_labels"], msg="Random outputs probe (val)", log_predictions=log_predictions)
+        
         if log_predictions:
             statistics["train"].append(train_stats)
             
@@ -1268,19 +1021,6 @@ if not os.path.exists(model_file):
             predictions[epoch]["corrupted_val"] = val_corrupted_preds
             predictions[epoch]["random_outputs"] = random_outputs_preds
             predictions[epoch]["random_outputs_val"] = val_random_outputs_preds
-            
-            if use_ood_random_inputs:
-                predictions[epoch]["out_of_distribution"] = ood_preds
-                predictions[epoch]["out_of_distribution_val"] = val_ood_preds
-                predictions[epoch]["random_inputs_outputs"] = random_inputs_outputs_preds
-                predictions[epoch]["random_inputs_outputs_val"] = val_random_inputs_outputs_preds
-            
-            if contains_noisy:
-                statistics["train_non_noisy"].append(train_non_noisy_stats)
-                statistics["train_noisy"].append(train_noisy_stats)
-                
-                predictions[epoch]["train_non_noisy"] = train_non_noisy_preds
-                predictions[epoch]["train_noisy"] = train_noisy_preds
         
         statistics["test"].append(test_stats)
         statistics["typical"].append(typical_stats)
@@ -1291,11 +1031,6 @@ if not os.path.exists(model_file):
         statistics["corrupted_val"].append(val_corrupted_stats)
         statistics["random_outputs"].append(random_outputs_stats)
         statistics["random_outputs_val"].append(val_random_outputs_stats)
-        if use_ood_random_inputs:
-            statistics["out_of_distribution"].append(ood_stats)
-            statistics["out_of_distribution_val"].append(val_ood_stats)
-            statistics["random_inputs_outputs"].append(random_inputs_outputs_stats)
-            statistics["random_inputs_outputs_val"].append(val_random_inputs_outputs_stats)
         
         if lr_scheduler is not None:
             lr_scheduler.step()
@@ -1331,6 +1066,7 @@ else:
 # In[ ]:
 
 
+print("Final train accuracy:", statistics["train"][-1])
 print("Final test accuracy:", statistics["test"][-1])
 
 
@@ -1339,77 +1075,85 @@ print("Final test accuracy:", statistics["test"][-1])
 # In[ ]:
 
 
-plt.figure(figsize=(12, 8))
 line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
 marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
 marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
-contains_noisy = fraction_of_noisy_labels > 0
-print("Dataset contains noisy points?", contains_noisy)
 
-x_vals = list(range(1, len(statistics["test"])+1))
-for idx, k in enumerate(statistics.keys()):
-    if k == "predictions":
-        continue
-    if not contains_noisy and (k == "train_noisy" or k == "train_non_noisy"):
-        continue  # Everything else is already covered in the train set
-    if not log_predictions and k == "train":
-        continue
-    line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
-                    color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-    line[0].set_color(marker_colors[idx % len(marker_colors)])
-    line[0].set_linestyle(line_styles[idx % len(line_styles)])
+plot_train_test_sets = False
+linewidth = 5.0
+alpha = 0.7
 
-plt.legend(prop={'size': font_size})
-plt.xlabel("Epochs", fontsize=font_size)
-plt.ylabel("Accuracy (%)", fontsize=font_size)
-plt.xticks(fontsize=font_size)
-plt.yticks(fontsize=font_size)
+for val_included in [True, False]:
+    fig, ax = plt.subplots()
+    fig.set_size_inches(8, 6)
+    
+    x_vals = list(range(1, len(statistics["test"])+1))
+    for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
+        if k == "predictions":
+            continue
+        if not log_predictions and k == "train":
+            continue
+        if not val_included and "_val" in k:
+            continue
+        if not plot_train_test_sets and ("train" in k or "test" in k):
+            continue
+        line = plt.plot(x_vals, [x["acc"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
+                        alpha=alpha, label=label_map_dict[k])
+        line[0].set_color(marker_colors[idx % len(marker_colors)])
+        line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
-if include_plot_title:
-    plt.title(f"Training accuracy dynamics computed (w/ {fraction_of_noisy_labels*100}% noise) for ResNet-50 ({dataset.upper()})", fontsize=font_size)
-plt.tight_layout()
-output_file = os.path.join(experiment_output_dir, f"noisy_{fraction_of_noisy_labels}p_probe_acc_{dataset}.png")
-if main_proc and output_file is not None:
-    plt.savefig(output_file, dpi=300, bbox_inches="tight")
-plt.show()
+    plt.legend(prop={'size': font_size})
+    plt.xlabel("Epochs", fontsize=font_size)
+    plt.ylabel("Accuracy (%)", fontsize=font_size)
+    plt.xticks(fontsize=font_size)
+    plt.yticks(fontsize=font_size)
+
+    if include_plot_title:
+        plt.title(f"Training accuracy dynamics computed for ResNet-50 ({dataset_name.upper()})", fontsize=font_size)
+    plt.tight_layout()
+    output_file = os.path.join(experiment_output_dir, f"probe_acc_{dataset}{'_val' if val_included else ''}.png")
+    if main_proc and output_file is not None:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.show()
 
 
 # In[ ]:
 
 
-plt.figure(figsize=(12, 8))
 line_styles = ['solid', 'dashed', 'dashdot', 'dotted']
 marker_list = ['o', '*', 'X', 'P', 'p', 'D', 'v', '^', 'h', '1', '2', '3', '4']
 marker_colors = ["tab:gray", "tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
-contains_noisy = fraction_of_noisy_labels > 0
-print("Dataset contains noisy points?", contains_noisy)
 
-x_vals = list(range(1, len(statistics["test"])+1))
-for idx, k in enumerate(statistics.keys()):
-    if k == "predictions":
-        continue
-    if not contains_noisy and (k == "train_noisy" or k == "train_non_noisy"):
-        continue  # Everything else is already covered in the train set
-    if not log_predictions and k == "train":
-        continue
-    line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=2., marker=marker_list[idx % len(marker_list)],
-                    color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-    line[0].set_color(marker_colors[idx % len(marker_colors)])
-    line[0].set_linestyle(line_styles[idx % len(line_styles)])
+for val_included in [True, False]:
+    fig, ax = plt.subplots()
+    fig.set_size_inches(8, 6)
+    
+    x_vals = list(range(1, len(statistics["test"])+1))
+    for idx, k in enumerate(natsort.natsorted(list(statistics.keys()))):
+        if k == "predictions":
+            continue
+        if not log_predictions and k == "train":
+            continue
+        if not val_included and "_val" in k:
+            continue
+        line = plt.plot(x_vals, [x["loss"] for x in statistics[k]], linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
+                        alpha=alpha, label=label_map_dict[k])
+        line[0].set_color(marker_colors[idx % len(marker_colors)])
+        line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
-plt.legend(prop={'size': font_size})
-plt.xlabel("Epochs", fontsize=font_size)
-plt.ylabel("Loss", fontsize=font_size)
-plt.xticks(fontsize=font_size)
-plt.yticks(fontsize=font_size)
+    plt.legend(prop={'size': font_size})
+    plt.xlabel("Epochs", fontsize=font_size)
+    plt.ylabel("Loss", fontsize=font_size)
+    plt.xticks(fontsize=font_size)
+    plt.yticks(fontsize=font_size)
 
-if include_plot_title:
-    plt.title(f"Training loss dynamics computed (w/ {fraction_of_noisy_labels*100}% noise) for ResNet-50 ({dataset.upper()})", fontsize=font_size)
-plt.tight_layout()
-output_file = os.path.join(experiment_output_dir, f"noisy_{fraction_of_noisy_labels}p_probe_loss_{dataset}.png")
-if main_proc and output_file is not None:
-    plt.savefig(output_file, dpi=300, bbox_inches="tight")
-plt.show()
+    if include_plot_title:
+        plt.title(f"Training loss dynamics computed for ResNet-50 ({dataset_name.upper()})", fontsize=font_size)
+    plt.tight_layout()
+    output_file = os.path.join(experiment_output_dir, f"probe_loss_{dataset}{'_val' if val_included else ''}.png")
+    if main_proc and output_file is not None:
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.show()
 
 
 # In[ ]:
@@ -1432,7 +1176,7 @@ print("Unique dataset probe identity:", unique_probe_identity)
 
 if not os.path.exists(data_statistics_file):
     sorted_ex_list = []
-    num_total_vals = len(comb_train_set)  # should be equal to len(train_set) + len(probe_set)
+    num_total_vals = len(comb_train_set)  # 50000 + 600
 
     print("Computing sorted prediction and target list...")
     for k in tqdm(statistics["predictions"].keys()):  # Iterate over epochs
@@ -1483,6 +1227,7 @@ if not os.path.exists(data_statistics_file):
 
 
     # In[ ]:
+
 
     stats = {k: 0 for k in unique_probe_identity}
     epoch_cummulative_scores = {k: [] for k in unique_probe_identity}
@@ -1556,36 +1301,44 @@ print("Normalizers:", normalizers)
 # In[ ]:
 
 
-for iden, epoch_scores in enumerate([epoch_cummulative_scores, epoch_cummulative_scores_first_learned]):
-    fig, ax = plt.subplots()
-    fig.set_size_inches(12, 8)
+for val_included in [True, False]:
+    for iden, epoch_scores in enumerate([epoch_cummulative_scores, epoch_cummulative_scores_first_learned]):
+        fig, ax = plt.subplots()
+        fig.set_size_inches(8, 6)
 
-    for idx, k in enumerate(epoch_scores.keys()):
-        y = epoch_scores[k]
-        x = np.arange(len(y))
-        y_norm = [(float(i) / normalizers[k]) * 100. for i in y]
-        line = plt.plot(x, y_norm, linewidth=2., marker=marker_list[idx % len(marker_list)],
-                        color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
-        line[0].set_color(marker_colors[idx % len(marker_colors)])
-        line[0].set_linestyle(line_styles[idx % len(line_styles)])
+        for idx, k in enumerate(natsort.natsorted(list(epoch_scores.keys()))):
+            if not val_included and "_val" in k:
+                continue
+            if not plot_train_test_sets and ("train" in k or "test" in k):
+                continue
+            
+            y = epoch_scores[k]
+            x = np.arange(len(y))
+            y_norm = [(float(i) / normalizers[k]) * 100. for i in y]
+            # line = plt.plot(x, y_norm, linewidth=2., marker=marker_list[idx % len(marker_list)],
+            #                 color=marker_colors[idx % len(marker_colors)], alpha=0.75, markeredgecolor='k', label=label_map_dict[k])
+            line = plt.plot(x_vals, y_norm, linewidth=linewidth, color=marker_colors[idx % len(marker_colors)], 
+                            alpha=alpha, label=label_map_dict[k])
+            line[0].set_color(marker_colors[idx % len(marker_colors)])
+            line[0].set_linestyle(line_styles[idx % len(line_styles)])
 
-    plt.xlabel("Number of epochs", fontsize=font_size)
-    # plt.ylabel(f"Fraction of examples learned{'at any point during training' if iden == 1 else ''} (%)", fontsize=font_size)
-    plt.ylabel(f"Fraction of examples learned (%)", fontsize=font_size)
-    if include_plot_title:
-        plt.title(f"Learning dynamics computed (w/ {fraction_of_noisy_labels*100}% noise) for ResNet-50 (CIFAR-100)", fontsize=font_size)
-    plt.legend(prop={'size': font_size})
-    plt.ylim(0., 100.)
-    
-    plt.xticks(fontsize=font_size)
-    plt.yticks(fontsize=font_size)
+        plt.xlabel("Number of epochs", fontsize=font_size)
+        # plt.ylabel(f"Fraction of examples learned{'at any point during training' if iden == 1 else ''} (%)", fontsize=font_size)
+        plt.ylabel(f"Fraction of examples learned (%)", fontsize=font_size)
+        if include_plot_title:
+            plt.title(f"Learning dynamics computed for ResNet-50 ({dataset_name.upper()})", fontsize=font_size)
+        plt.legend(prop={'size': font_size})
+        plt.ylim(0., 100.)
+        
+        plt.xticks(fontsize=font_size)
+        plt.yticks(fontsize=font_size)
 
-    plt.tight_layout()
-    output_file = os.path.join(experiment_output_dir, f"noisy_{fraction_of_noisy_labels}p{'_first_learned' if iden == 1 else '_learning'}_dynamics_{dataset}.png")
-    if main_proc and output_file is not None:
-        plt.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.show()
-    plt.close('all')
+        plt.tight_layout()
+        output_file = os.path.join(experiment_output_dir, f"{'first_learned' if iden == 1 else 'learning'}_dynamics_{dataset}{'_val' if val_included else ''}.png")
+        if main_proc and output_file is not None:
+            plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        plt.show()
+        plt.close('all')
 
 
 # ### Loss distribution plots
@@ -1634,7 +1387,7 @@ plot_points = False
 handles = []
 legend_label = []
 for i, cls in enumerate(class_names):
-    if cls in ["train", "train_noisy"]:
+    if cls in ["train"]:
         continue
     print("Class:", cls)
     color = color_list[i % len(color_list)]
@@ -1669,7 +1422,7 @@ plt.xlabel("Epochs", fontsize=font_size)
 # plt.ylim(0, 6)
 
 plt.tight_layout()
-output_file = os.path.join(experiment_output_dir, f"noisy_{fraction_of_noisy_labels}p_loss_dist_{dataset}.png")
+output_file = os.path.join(experiment_output_dir, f"loss_dist_{dataset}.png")
 if main_proc and output_file is not None:
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
 plt.show()
@@ -1701,9 +1454,6 @@ for epoch in range(0, len(sorted_losses_all), 5):
     iterator = 0
     
     rej_classes = []
-    if contains_noisy:
-        rej_classes = ["train_noisy"]
-    
     for i, cls in enumerate(class_names):
         if cls in rej_classes:
             print(f"Ignoring class {cls} at index {i}")
@@ -1737,7 +1487,7 @@ for epoch in range(0, len(sorted_losses_all), 5):
     plt.ylim(0., 14.)
     
     plt.tight_layout()
-    output_file = os.path.join(loss_dynamics_output_dir, f"noisy_{fraction_of_noisy_labels}p_loss_dist_ep_{epoch}_{dataset}.png")
+    output_file = os.path.join(loss_dynamics_output_dir, f"loss_dist_ep_{epoch}_{dataset}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
     plt.show()
@@ -1758,9 +1508,7 @@ for epoch in range(0, len(sorted_losses_all), 5):
     data = []
     iterator = 0
     
-    # rej_classes = [x for x in class_names if x.endswith("_val")]
-    if contains_noisy:
-        rej_classes += ["train_noisy"]
+    rej_classes = []
     print("Rejected classes:", rej_classes)
     
     for i, cls in enumerate(class_names):
@@ -1804,7 +1552,7 @@ for epoch in range(0, len(sorted_losses_all), 5):
     plt.ylim(0., 14.)
 
     plt.tight_layout()
-    output_file = os.path.join(violin_loss_dynamics_output_dir, f"noisy_{fraction_of_noisy_labels}p_loss_dist_violin_ep_{epoch}_{dataset}.png")
+    output_file = os.path.join(violin_loss_dynamics_output_dir, f"loss_dist_violin_ep_{epoch}_{dataset}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
     plt.show()
@@ -1814,45 +1562,96 @@ for epoch in range(0, len(sorted_losses_all), 5):
 # In[ ]:
 
 
-for val_included in [True, False]:
-    current_class_names = [x for x in class_names if x not in ["train", "train_noisy", "train_non_noisy"]]
-    if not val_included:
-        current_class_names = [x for x in current_class_names if not x.endswith("_val")]
+def visualize_loss_trajectories(val_included=False, clf=None, output_file=None, plot_train=False):
+    if plot_train:
+        current_class_names = ["train"]
+    else:
+        current_class_names = [x for x in class_names if x not in ["train"]]
+        if not val_included:
+            current_class_names = [x for x in current_class_names if not x.endswith("_val")]
     print("Selected class names:", current_class_names)
     
-    fig, ax = plt.subplots(1, 1, figsize=(16, 8))
-    labels = list(range(1, len(sorted_losses_all)+1))
-    cm = plt.get_cmap('hsv')
-    color_list = [cm(1.*i/len(current_class_names)) for i in range(len(current_class_names))]
-    num_trajectories = 250
-    
+    num_colors = len(current_class_names)
+    if num_colors > 9:
+        cm = plt.get_cmap('hsv')
+        color_list = [cm(1.*i/len(current_class_names)) for i in range(len(current_class_names))]
+    elif num_colors > 4:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange", "tab:red", "tab:pink", "tab:olive", "tab:brown", "tab:cyan"]
+    else:
+        color_list = ["tab:green", "tab:blue", "tab:purple", "tab:orange"]
+    assert num_colors <= len(color_list), f"{num_colors} <= {len(color_list)}"
+    num_trajectories = 1000 if plot_train else 250
+    font_size = 18
+
+    fig, ax = plt.subplots(1, 1, figsize=(20, 8))
+
     handles = []
     legend_label = []
+
+    iterator = 0
     for i, cls in enumerate(current_class_names):
-        color = color_list[i % len(color_list)]
+        # if "val" in cls or "train" in cls:
+        #     continue
+        color = color_list[iterator]
         patch = mpatches.Patch(color=color)
         handles.append(patch)
+        # legend_label.append(cls.title().replace("_", " "))
         legend_label.append(label_map_dict[cls])
         
         relevant_idx = [i for i in range(len(dataset_probe_identity)) if dataset_probe_identity[i] == cls]
         print(f"Class: {cls} / # relevant idx: {len(relevant_idx)}")
-        
+
         x_axis = list(range(len(sorted_losses_all)))
+        all_trajs = []
         for j in range(num_trajectories):
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
-            plt.plot(x_axis, trajectory, color=color_list[i], alpha=0.05)
-
+            plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.01 if plot_train else 0.05)
+            all_trajs.append(trajectory)
+        
+        if clf is None:
+            # Plot the trajectory mean
+            mean_traj = np.array(all_trajs).mean(axis=0)
+            plt.plot(x_axis, mean_traj, color=color_list[iterator], alpha=0.9, linewidth=5.)
+        iterator += 1
+    
+    if clf is not None:
+        num_clusters = len(clf.cluster_centers_)
+        cm = plt.get_cmap('viridis')
+        new_color_list = [cm(1.*i/num_clusters) for i in range(num_clusters)]
+        
+        for i in range(num_clusters):
+            # Plot the cluster center
+            color = new_color_list[i]
+            cluster_center = clf.cluster_centers_[i]
+            plt.plot(x_axis, cluster_center, color=color, alpha=0.9, linewidth=5.)
+            
+            # Add the color to the legend
+            patch = mpatches.Patch(color=color)
+            handles.append(patch)
+            legend_label.append(f"Cluster # {i+1}")
+    
     ax.legend(handles, legend_label, prop={'size': font_size})
     plt.ylabel("Loss values", fontsize=font_size)
     plt.xlabel("Epochs", fontsize=font_size)
     plt.ylim(0., 14.)
+    plt.xlim(0., 99.)
+    plt.xticks(fontsize=font_size)
+    plt.yticks(fontsize=font_size)
 
     plt.tight_layout()
-    output_file = os.path.join(experiment_output_dir, f"noisy_{fraction_of_noisy_labels}p_loss_trajectories_{dataset}{'_val' if val_included else ''}.png")
+    if output_file is None:
+        output_file = os.path.join(experiment_output_dir, f"loss_trajectories_{dataset}{'_train' if plot_train else '_val' if val_included else ''}.png")
     if main_proc and output_file is not None:
         plt.savefig(output_file, dpi=300, bbox_inches="tight")
-    plt.show()
     plt.close('all')
+
+
+# In[ ]:
+
+
+visualize_loss_trajectories(plot_train=True)
+for val_included in [True, False]:
+    visualize_loss_trajectories(val_included)
 
 
 # In[ ]:
@@ -1879,7 +1678,7 @@ for i, cls in enumerate(class_names):
         print("Number of empty trajectories:", len(empty_idx))
 
 print("Total number of keys found:", dataset.keys(), {k: len(dataset[k]) for k in dataset.keys()})
-trajectory_dataset_file = os.path.join(experiment_output_dir, f"noisy_{fraction_of_noisy_labels}p_loss_trajectories.pkl")
+trajectory_dataset_file = os.path.join(experiment_output_dir, f"loss_trajectories.pkl")
 with open(trajectory_dataset_file, "wb") as f:
     pickle.dump(dataset, f, protocol=pickle.HIGHEST_PROTOCOL)
 print("Trajectory dataset written to file:", trajectory_dataset_file)
@@ -1934,6 +1733,14 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, normalize=False, t
         labels=None,
         normalize=None,
     )
+
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:,np.newaxis]
+        cm = np.around(cm,decimals=2)
+        cm[np.isnan(cm)] = 0.0
+        print('Normalized confusion matrix')
+    else:
+        print('Confusion matrix, without normalization')
     
     plt.figure(figsize=(8, 7))
 
@@ -1948,35 +1755,59 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, normalize=False, t
     plt.xticks(tick_marks, display_labels, fontsize=fontsize, rotation=45, ha="right")
     plt.yticks(tick_marks, display_labels, fontsize=fontsize, rotation=0, ha="right")
 
-    if normalize:
-        cm=cm.astype('float')/cm.sum(axis=1)[:,np.newaxis]
-        cm=np.around(cm,decimals=2)
-        cm[np.isnan(cm)]=0.0
-        print('Normalized confusion matrix')
-    else:
-        print('Confusion matrix, without normalization')
-
-    thresh=cm.max()/2
+    thresh = np.median(cm)
 
     for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
         plt.text(j, i, cm[i, j], horizontalalignment="center", fontsize=fontsize, color="white" if cm[i, j] > thresh else "black", )
         plt.tight_layout()
-        plt.ylabel('True label',fontsize=fontsize)
-        plt.xlabel('Predicted label',fontsize=fontsize)
+        plt.ylabel('True label', fontsize=fontsize)
+        plt.xlabel('Predicted label', fontsize=fontsize)
 
 
 # In[ ]:
 
 
 print("Evaluating the trajectory classifier...")
-prediction = clf.predict(probe_val_x)
-test_acc = (prediction == probe_val_y).astype(np.float32).mean()
-print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
-fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-plot_confusion_matrix_from_preds(probe_val_y, prediction, main_classes)
-plt.tight_layout()
-output_file = os.path.join(experiment_output_dir, f"probe_confusion_matrix_trajectories_val_probes_{num_example_probes}{'_wo_ood_noisy' if not use_ood_random_inputs else ''}.png")
-plt.savefig(output_file, dpi=300, bbox_inches="tight")
+for normalize in [False, True]:
+    prediction = clf.predict(probe_val_x)
+    test_acc = (prediction == probe_val_y).astype(np.float32).mean()
+    print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+    plot_confusion_matrix_from_preds(probe_val_y, prediction, main_classes, normalize=normalize)
+    plt.tight_layout()
+    output_file = os.path.join(experiment_output_dir, f"probe_confusion_matrix_trajectories_val_probes_{num_example_probes}{'_norm' if normalize else ''}.png")
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+
+
+# In[ ]:
+
+
+def plot_probe_ex(x, y, probs, output_file=None):
+    plot_size = 3
+    fig, ax = plt.subplots(plot_rows, num_plots_per_row, figsize=(plot_size * num_plots_per_row, plot_size * plot_rows), sharex=True, sharey=True)
+
+    for idx in range(len(x)):
+        ax[idx // num_plots_per_row, idx % num_plots_per_row].imshow(x[idx])
+        # ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(y[idx])
+        if probs is not None:
+            ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(f"{y[idx]} (PD: {probs[idx]:.3f})")
+        else:
+            ax[idx // num_plots_per_row, idx % num_plots_per_row].set_title(f"{y[idx]}")
+
+        if idx == plot_rows * num_plots_per_row - 1:
+            break
+
+    for a in ax.ravel():
+        a.set_axis_off()
+
+        # Turn off tick labels
+        a.set_yticklabels([])
+        a.set_xticklabels([])
+
+    fig.tight_layout()
+    if output_file is not None:
+        fig.savefig(output_file, bbox_inches=0.0, pad_inches=0)
+    plt.close()
 
 
 # In[ ]:
@@ -2020,12 +1851,13 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
             assert len(pred) == 1
             pred = pred[0]
             pred_prob = float(probs[0, pred])
+            # probs = clf.predict(loss_traj[None, :])  # Cast it into a batch
+            # pred = np.argmax(probs)
             
-            if surface_examples:
-                # Step 06 -- save the images to folder
-                imgs = torch.nn.functional.interpolate(data.cpu(), size=(224, 224))
-                imgs = np.transpose(imgs.numpy(), (0, 2, 3, 1))  # BCHW -> BHWC
-                imgs = np.clip(imgs * 255, 0, 255).astype(np.uint8)
+            # Step 06 -- save the images to folder
+            imgs = torch.nn.functional.interpolate(data.cpu(), size=(224, 224))
+            imgs = np.transpose(imgs.numpy(), (0, 2, 3, 1))  # BCHW -> BHWC
+            imgs = np.clip(imgs * 255, 0, 255).astype(np.uint8)
 
             cls_name = train_set.classes[int(target[i])]
             pred_folder = idx2class[pred]
@@ -2058,26 +1890,28 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
 # In[ ]:
 
 
-if main_proc:
-    if os.path.exists(surface_dir):
-        shutil.rmtree(surface_dir)
-        print("Removed previous surfaced example output directory...")
-    os.mkdir(surface_dir)
+surface_examples = False
+if surface_examples:
+    surface_dir = os.path.join(experiment_output_dir, f"./surfaced_examples_{dataset}/")
+    if main_proc:
+        if os.path.exists(surface_dir):
+            shutil.rmtree(surface_dir)
+            print("Removed previous surfaced example output directory...")
+        os.mkdir(surface_dir)
+    
+    train_set.transform = transforms.Compose(no_transform)
+    if "cifar" in dataset_name:
+        classes_to_surface = list(range(num_classes))
+    else:
+        classes_to_surface = [531, 671, 728, 901, 999]  # Digital watch, mountain bike, plastic bag, Whiskey jug, Tiolet tissue,
+        classes_to_surface += [407, 413, 417, 435, 465, 508, 510, 527]  # Ambulance, Assault gun, Baloon, Bath tub, Bulletproof vest, computer keyboard, container ship, desktop computer
+        classes_to_surface += [982, 471, 651, 653, 771, 810, 859]  # Groom, canon, microwave, milk can, safe, space bar, toaster
+        classes_to_surface += [954, 953, 919, 847, 657, 605, 569]  # Banana, pineapple, street sign, tank, missile, iPod, gas mask
+    print("Chosen class:", classes_to_surface)
 
-surface_examples = True
-train_set.transform = transforms.Compose(no_transform)
-if "cifar" in dataset_name:
-    classes_to_surface = list(range(num_classes))
-else:
-    classes_to_surface = [531, 671, 728, 901, 999]  # Digital watch, mountain bike, plastic bag, Whiskey jug, Tiolet tissue,
-    classes_to_surface += [407, 413, 417, 435, 465, 508, 510, 527]  # Ambulance, Assault gun, Baloon, Bath tub, Bulletproof vest, computer keyboard, container ship, desktop computer
-    classes_to_surface += [982, 471, 651, 653, 771, 810, 859]  # Groom, canon, microwave, milk can, safe, space bar, toaster
-    classes_to_surface += [954, 953, 919, 847, 657, 605, 569]  # Banana, pineapple, street sign, tank, missile, iPod, gas mask
-print("Chosen class:", classes_to_surface)
-
-for class_to_surface in classes_to_surface:
-    print("Surfacing examples from class:", class_to_surface)
-    output_path = os.path.join(surface_dir, f"complete_traj_train_cls_{class_to_surface}_{train_set.classes[class_to_surface]}")
-    assign_probe_classes_knn(clf, new_idx_loader, sorted_losses_all, idx2class, output_path, class_to_surface)
-print("All files saved. Execution completed!")
+    for class_to_surface in classes_to_surface:
+        print("Surfacing examples from class:", class_to_surface)
+        output_path = os.path.join(surface_dir, f"complete_traj_train_cls_{class_to_surface}_{train_set.classes[class_to_surface]}")
+        assign_probe_classes_knn(clf, new_idx_loader, sorted_losses_all, idx2class, output_path, class_to_surface)
+    print("All files saved. Execution completed!")
 
