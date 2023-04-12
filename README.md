@@ -7,6 +7,9 @@ Check the [***OpenReview***](https://openreview.net/forum?id=PvLnIaJbt9) page fo
 ## Execution
 
 The code can be executed using the ```train.sh``` script provided.
+
+The code was tested with NVIDIA PyTorch container 22.10 (https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-22-10.html).
+
 The code also requires memorization/consistency scores to compute typical/atypical examples.
 Configure the ```data_dir``` variable in the script to define the path to these scores.
 
@@ -36,6 +39,11 @@ Please refer to the main script ```metadata_archaeology.py``` for details regard
   url={https://arxiv.org/abs/2209.10015}
 }
 ```
+
+## Disclaimer
+
+This branch contains minor deviations from the initial code.
+Please check the `initial` branch when attempting to reproduce results.
 
 ## Issues/Feedback
 
