@@ -1587,20 +1587,22 @@ def visualize_loss_trajectories(val_included=False, clf=None, output_file=None, 
 
     iterator = 0
     for i, cls in enumerate(current_class_names):
-        # if "val" in cls or "train" in cls:
-        #     continue
         color = color_list[iterator]
         patch = mpatches.Patch(color=color)
         handles.append(patch)
-        # legend_label.append(cls.title().replace("_", " "))
         legend_label.append(label_map_dict[cls])
         
         relevant_idx = [i for i in range(len(dataset_probe_identity)) if dataset_probe_identity[i] == cls]
+        relevant_idx = np.random.choice(relevant_idx, size=(len(relevant_idx)), replace=False)  # Randomly shuffle the list
         print(f"Class: {cls} / # relevant idx: {len(relevant_idx)}")
 
         x_axis = list(range(len(sorted_losses_all)))
         all_trajs = []
-        for j in range(num_trajectories):
+        j = -1
+        while len(all_trajs) < num_trajectories and j < (len(relevant_idx) - 1):
+            j += 1
+            if sorted_losses_all[epoch][relevant_idx[j]] is None:
+                continue
             trajectory = [float(sorted_losses_all[epoch][relevant_idx[j]]) for epoch in range(len(sorted_losses_all))]
             plt.plot(x_axis, trajectory, color=color_list[iterator], alpha=0.01 if plot_train else 0.05)
             all_trajs.append(trajectory)
@@ -1889,7 +1891,7 @@ def assign_probe_classes_knn(clf, idx_train_loader, sorted_losses_all, idx2class
 
 surface_examples = True
 if surface_examples:
-    surface_dir = os.path.join(experiment_output_dir, f"./surfaced_examples_{dataset}/")
+    surface_dir = os.path.join(experiment_output_dir, f"./surfaced_examples_{dataset_name}/")
     if main_proc:
         if os.path.exists(surface_dir):
             shutil.rmtree(surface_dir)
