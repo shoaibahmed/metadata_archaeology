@@ -292,7 +292,7 @@ print(f"Dataset name: {ood_dataset_name} / Path: {ood_dataset_path}")
 
 ood_dataset = ImageFolder(ood_dataset_path, transform=test_transform)
 assert len(ood_dataset) >= num_example_probes, f"{len(ood_dataset)} < {num_example_probes}"
-print("Number of examples found in (anomalous species) OOD dataset:", len(ood_dataset))
+print(f"Number of examples found in OOD dataset ({ood_dataset_name}): {len(ood_dataset)}")
 
 if not use_model_pred:
     # Create a class map to ensure that the class mapping is correct for ImageNet-R
@@ -395,6 +395,11 @@ all_trajectories = np.concatenate([id_trajectories, ood_trajectories], axis=0)
 print(f"ID trajectories: {id_trajectories.shape} / OOD trajectories: {ood_trajectories.shape} / All trajectories: {all_trajectories.shape}")
 clf.fit(all_trajectories, all_labels)
 
+# Create the one-class classifier
+oc_clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
+id_labels = np.array([0 for _ in range(len(id_trajectories))])
+oc_clf.fit(id_trajectories, id_labels)
+
 
 # In[ ]:
 
@@ -407,6 +412,7 @@ thresh = 0.5
 key_list = ["ID", "OOD"]
 label_dict = dict()
 pred_dict = dict()
+avg_dist_dict = dict()
 max_logit_dict = dict()
 
 for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader]):
@@ -418,7 +424,7 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
         assert loader_idx == 1
         print("Evaluating on OOD test set...")
     
-    predictions, targets, max_logits = [], [], []
+    predictions, targets, avg_dists, max_logits = [], [], [], []
     id_pred, ood_pred, total = 0, 0, 0
     for x, y in tqdm(loader):
         x = x.to(device)
@@ -447,6 +453,12 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
         assert len(traj_preds.shape) == 2, traj_preds.shape
         assert traj_preds.shape == (len(current_trajectories), 2), traj_preds.shape
         
+        # Perform inference on the ID trajectories
+        neighbors_dist, _ = oc_clf.kneighbors(current_trajectories)
+        assert neighbors_dist.shape == (len(current_trajectories), n_neighbors), neighbors_dist.shape
+        avg_dist = neighbors_dist.mean(axis=1)
+        avg_dists.append(avg_dist)
+        
         # Evaluate the prediction
         id_pred += np.sum(traj_preds[:, 1] < thresh)
         ood_pred += np.sum(traj_preds[:, 1] >= thresh)
@@ -464,6 +476,7 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     
     # Collect final stats
     predictions = np.concatenate(predictions)
+    avg_dists = np.concatenate(avg_dists)
     max_logits = np.concatenate(max_logits)
     labels = np.zeros_like(predictions) if loader_idx == 0 else np.ones_like(predictions)
     
@@ -474,19 +487,22 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     key = key_list[loader_idx]  # Can only be 0 or 1
     label_dict[key] = labels
     pred_dict[key] = predictions
+    avg_dist_dict[key] = avg_dists
     max_logit_dict[key] = max_logits
     
     # Write the stats to file
     trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}{'_max_logit' if use_max_logit_traj else ''}_trajectories.pkl")
     with open(trajectory_dataset_file, "wb") as f:
-        pickle.dump([predictions, max_logits, labels], f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump([predictions, avg_dist_dict, max_logits, labels], f, protocol=pickle.HIGHEST_PROTOCOL)
     print("Trajectory dataset written to file:", trajectory_dataset_file)
 
 # Plot the RoC curve
-key_list = ["MAP-D", "Max-Logit"]
+key_list = ["MAP-D", "MAP-D (only ID)", "Max-Logit"]
 label_dict["MAP-D"] = np.concatenate([label_dict["ID"], label_dict["OOD"]])
+label_dict["MAP-D (only ID)"] = label_dict["MAP-D"].copy()
 label_dict["Max-Logit"] = label_dict["MAP-D"].copy()
 pred_dict["MAP-D"] = np.concatenate([pred_dict["ID"], pred_dict["OOD"]])
+pred_dict["MAP-D (only ID)"] = np.concatenate([avg_dist_dict["ID"], avg_dist_dict["OOD"]])
 pred_dict["Max-Logit"] = np.concatenate([max_logit_dict["ID"], max_logit_dict["OOD"]])
 output_file = os.path.join(experiment_output_dir, f"auc_imagenet_id_vs_ood_{ood_dataset_name}{'_max_logit_traj' if use_max_logit_traj else ''}.png")
 plot_auc(label_dict, pred_dict, key_list, output_file)
