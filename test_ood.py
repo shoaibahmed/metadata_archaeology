@@ -23,37 +23,24 @@ import dist_utils
 
 def test_tensor(model, device, criterion, data, target, msg=None, log_predictions=False):
     assert torch.is_tensor(data) and torch.is_tensor(target)
-    aux_criterion = None
-    if isinstance(criterion, list) or isinstance(criterion, tuple):
-        criterion, aux_criterion = criterion
     
     model.eval()
-    aux_test_loss = -1
     with torch.no_grad():
-        features, output = model(data)
+        output = model(data)
         loss_vals = criterion(output, target)
         test_loss = float(loss_vals.mean())
-        if aux_criterion is not None:
-            aux_loss_vals = aux_criterion(features, target)
-            aux_test_loss = float(aux_loss_vals.mean())
         
         pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
         correct = pred.eq(target.view_as(pred)).sum().item()
         total = len(data)
     
     test_acc = 100. * correct / total
-    output_dict = dict(loss=test_loss, aux_loss=aux_test_loss, acc=test_acc, correct=correct, total=total)
+    output_dict = dict(loss=test_loss, acc=test_acc, correct=correct, total=total)
     
     loss_vals = loss_vals.detach().cpu().numpy()
     output_dict["loss_mean"] = np.mean(loss_vals)
     output_dict["loss_var"] = np.var(loss_vals)
     output_dict["loss_std"] = np.std(loss_vals)
-    
-    if aux_criterion is not None:
-        aux_loss_vals = aux_loss_vals.detach().cpu().numpy()
-        output_dict["aux_loss_mean"] = np.mean(aux_loss_vals)
-        output_dict["aux_loss_var"] = np.var(aux_loss_vals)
-        output_dict["aux_loss_std"] = np.std(aux_loss_vals)
     
     pred_dict = None
     if log_predictions:
@@ -62,13 +49,9 @@ def test_tensor(model, device, criterion, data, target, msg=None, log_prediction
         pred_dict["loss_vals"] = loss_vals
         pred_dict["preds"] = pred.detach().cpu().numpy()
         pred_dict["targets"] = target.detach().cpu().numpy()
-        if aux_criterion is not None:
-            pred_dict["aux_loss_vals"] = aux_loss_vals
     
     header = "Test set" if msg is None else msg
     print(f"{header} | Loss mean: {output_dict['loss_mean']:.4f} | Loss std: {output_dict['loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
-    if aux_criterion is not None:
-        print(f"{header} / Aux stats | Loss mean: {output_dict['aux_loss_mean']:.4f} | Loss std: {output_dict['aux_loss_std']:.4f} | Accuracy: {test_acc:.2f}% ({correct}/{total})")
     
     return output_dict, pred_dict
 
@@ -208,7 +191,8 @@ class MaxLogitLoss(torch.nn.Module):
 # Initialize the distributed environment
 gpu = 0
 world_size = 1
-distributed = int(os.getenv('WORLD_SIZE', 1)) > 1
+distributed = True  # Essential for loading pretrained models  
+# distributed = int(os.getenv('WORLD_SIZE', 1)) > 1
 rank = int(os.getenv('RANK', 0))
 local_rank = 0
 
@@ -280,7 +264,8 @@ model = dist_utils.convert_to_distributed(model, local_rank, sync_bn=True)
 test_transform = [transforms.Resize(256),
                   transforms.CenterCrop(224),
                   transforms.ToTensor()]
-test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=transforms.Compose(test_transform))
+test_transform = transforms.Compose(test_transform)
+test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=test_transform)
 
 
 # In[ ]:
@@ -352,10 +337,10 @@ model.eval()
 if use_model_pred:
     # Use the model's prediction as target for computing the trajectory
     with torch.no_grad():
-        _, logits = model(probes_ood_det["id"])
+        logits = model(probes_ood_det["id"])
         probes_ood_det["id_labels"] = logits.argmax(dim=1)
         
-        _, logits = model(probes_ood_det["ood"])
+        logits = model(probes_ood_det["ood"])
         probes_ood_det["ood_labels"] = logits.argmax(dim=1)
 
 # Create model replicas
@@ -443,7 +428,7 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
             # Use the model's prediction as target for computing the trajectory
             model.eval()
             with torch.no_grad():
-                _, logits = model(x)
+                logits = model(x)
                 y = logits.argmax(dim=1)
         
         current_trajectories = []
@@ -472,7 +457,7 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
         model.load_state_dict(torch.load(model_file, map_location=device))
         model.eval()
         with torch.no_grad():
-            _, logits = model(x)
+            logits = model(x)
             max_logit, max_logit_idx = logits.max(dim=1)
             neg_max_logit = -max_logit  # Take the negative of the maximum logit as the anomaly score
             max_logits.append(neg_max_logit.cpu().detach().numpy())
