@@ -396,7 +396,8 @@ print(f"ID trajectories: {id_trajectories.shape} / OOD trajectories: {ood_trajec
 clf.fit(all_trajectories, all_labels)
 
 # Create the one-class classifier
-oc_clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
+oc_clf_neighbors = num_example_probes
+oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
 id_labels = np.array([0 for _ in range(len(id_trajectories))])
 oc_clf.fit(id_trajectories, id_labels)
 
@@ -455,7 +456,7 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
         
         # Perform inference on the ID trajectories
         neighbors_dist, _ = oc_clf.kneighbors(current_trajectories)
-        assert neighbors_dist.shape == (len(current_trajectories), n_neighbors), neighbors_dist.shape
+        assert neighbors_dist.shape == (len(current_trajectories), oc_clf_neighbors), neighbors_dist.shape
         avg_dist = neighbors_dist.mean(axis=1)
         avg_dists.append(avg_dist)
         
@@ -471,14 +472,14 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
         with torch.no_grad():
             logits = model(x)
             max_logit, max_logit_idx = logits.max(dim=1)
-            neg_max_logit = -max_logit  # Take the negative of the maximum logit as the anomaly score
+            neg_max_logit = -max_logit  # Pred represents score for class 1 (OOD), but max logit is lower for OOD
             max_logits.append(neg_max_logit.cpu().detach().numpy())
     
     # Collect final stats
     predictions = np.concatenate(predictions)
     avg_dists = np.concatenate(avg_dists)
     max_logits = np.concatenate(max_logits)
-    labels = np.zeros_like(predictions) if loader_idx == 0 else np.ones_like(predictions)
+    labels = np.zeros((len(predictions),), dtype=np.int64) if loader_idx == 0 else np.ones((len(predictions),), dtype=np.int64)
     
     assert id_pred == np.sum(predictions < thresh), id_pred
     assert ood_pred == np.sum(predictions >= thresh), ood_pred
