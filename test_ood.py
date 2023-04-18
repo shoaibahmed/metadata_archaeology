@@ -1,4 +1,5 @@
 import os
+import sys
 import copy
 import pickle
 from tqdm import tqdm
@@ -280,7 +281,14 @@ print("OOD trajectory loss function:", loss_fn)
 
 # Load the OOD dataset
 ood_dataset_name = "imagenet_sketches"
-assert ood_dataset_name in ["anomalous_species", "imagenet_sketches", "imagenet-o"]
+if len(sys.argv) > 2:
+    print(f"Usage: {sys.argv[0]} <Optional: dataset name>")
+    exit()
+if len(sys.argv) > 1:
+    ood_dataset_name = sys.argv[1]
+    print("Received dataset arg:", ood_dataset_name)
+assert ood_dataset_name in ["anomalous_species", "imagenet_sketches", "imagenet-o"], ood_dataset_name
+
 if ood_dataset_name == "anomalous_species":
     ood_dataset_path = "/netscratch/siddiqui/Datasets/anomalous_species/species/"
 elif ood_dataset_name == "imagenet_o":
