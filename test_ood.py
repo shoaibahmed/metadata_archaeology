@@ -156,7 +156,7 @@ def plot_auc(labels, predictions, key_list, output_file):
     # Sort legend labels
     handles, labels = ax.get_legend_handles_labels()
     labels, handles = zip(*sorted(zip(labels, handles), key=lambda t: t[0]))
-    ax.legend(handles, labels)
+    ax.legend(handles, labels, prop={'size': fontsize})
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
@@ -425,6 +425,14 @@ avg_dist_dict = dict()
 max_logit_dict = dict()
 
 for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader]):
+    trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}{'_max_logit' if use_max_logit_traj else ''}_trajectories.pkl")
+    if os.path.exists(trajectory_dataset_file):
+        print("Loading trajectories from file:", trajectory_dataset_file)
+        with open(trajectory_dataset_file, "rb") as f:
+            predictions, avg_dist_dict, max_logits, labels = pickle.load(f)
+        print("Files loaded successfully. Skipping computation...")
+        continue
+    
     # Evalute the model's detection performance on the ImageNet test examples and OOD dataset
     # ID -- shouldn't discard examples; OOD -- should discard examples
     if loader_idx == 0:
@@ -500,7 +508,6 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     max_logit_dict[key] = max_logits
     
     # Write the stats to file
-    trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}{'_max_logit' if use_max_logit_traj else ''}_trajectories.pkl")
     with open(trajectory_dataset_file, "wb") as f:
         pickle.dump([predictions, avg_dist_dict, max_logits, labels], f, protocol=pickle.HIGHEST_PROTOCOL)
     print("Trajectory dataset written to file:", trajectory_dataset_file)
