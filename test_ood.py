@@ -287,7 +287,7 @@ if len(sys.argv) > 2:
 if len(sys.argv) > 1:
     ood_dataset_name = sys.argv[1]
     print("Received dataset arg:", ood_dataset_name)
-assert ood_dataset_name in ["anomalous_species", "imagenet_sketches", "imagenet-o"], ood_dataset_name
+assert ood_dataset_name in ["anomalous_species", "imagenet_sketches", "imagenet_o"], ood_dataset_name
 
 if ood_dataset_name == "anomalous_species":
     ood_dataset_path = "/netscratch/siddiqui/Datasets/anomalous_species/species/"
