@@ -186,6 +186,36 @@ class MaxLogitLoss(torch.nn.Module):
         return max_logit
 
 
+class SortedLogitLoss(torch.nn.Module):
+    """Define a custom loss criterion which computes the sorted-logit trajectory"""
+    def __init__(self):
+        super(SortedLogitLoss, self).__init__()
+    
+    def forward(self, x, y):
+        sorted_logit = torch.sort(x, dim=1, descending=True)
+        return sorted_logit
+
+
+# In[ ]:
+
+
+if len(sys.argv) > 3:
+    print(f"Usage: {sys.argv[0]} <Optional: dataset name> <Optional: trajectory type>")
+    exit()
+
+ood_dataset_name = "imagenet_sketches"
+if len(sys.argv) > 1:
+    ood_dataset_name = sys.argv[1]
+    print("Received dataset arg:", ood_dataset_name)
+assert ood_dataset_name in ["anomalous_species", "imagenet_sketches", "imagenet_o"], ood_dataset_name
+
+trajectory_type = "max-logit"
+if len(sys.argv) > 2:
+    trajectory_type = sys.argv[2]
+    print("Received trajectory type arg:", trajectory_type)
+assert trajectory_type in ["loss", "max-logit", "sorted-logit"]
+
+
 # In[ ]:
 
 
@@ -227,7 +257,6 @@ Note: We can compute the loss trajectory after the completion of training only b
 
 OOD Dataset: Anomalous species (https://arxiv.org/pdf/1911.11132.pdf)
 """
-use_max_logit_traj = True
 use_model_pred = True
 num_example_probes = 250
 
@@ -272,23 +301,17 @@ test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=test_tra
 # In[ ]:
 
 
-print(f"Performing OOD detection using {'max-logit' if use_max_logit_traj else 'loss'} trajectory...")
-if use_max_logit_traj:
+print(f"Performing OOD detection using {trajectory_type} trajectory...")
+if trajectory_type == "max-logit":
     loss_fn = MaxLogitLoss()
+elif trajectory_type == "sorted-logit":
+    loss_fn = SortedLogitLoss()
 else:
+    assert trajectory_type == "loss"
     loss_fn = torch.nn.CrossEntropyLoss()
 print("OOD trajectory loss function:", loss_fn)
 
 # Load the OOD dataset
-ood_dataset_name = "imagenet_sketches"
-if len(sys.argv) > 2:
-    print(f"Usage: {sys.argv[0]} <Optional: dataset name>")
-    exit()
-if len(sys.argv) > 1:
-    ood_dataset_name = sys.argv[1]
-    print("Received dataset arg:", ood_dataset_name)
-assert ood_dataset_name in ["anomalous_species", "imagenet_sketches", "imagenet_o"], ood_dataset_name
-
 if ood_dataset_name == "anomalous_species":
     ood_dataset_path = "/netscratch/siddiqui/Datasets/anomalous_species/species/"
 elif ood_dataset_name == "imagenet_o":
@@ -376,6 +399,21 @@ for epoch in range(num_epochs):
     ood_trajectories.append(ood_preds["loss_vals"])
 
 # Convert the loss values into a trajectory
+if trajectory_type == "sorted-logit":
+    # Data shape: num epochs x num examples x num classes -> (num epochs x num_classes) x num_examples
+    print(f"!! Reshaping sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories)}")
+    num_eps, num_id_ex, num_cls = id_trajectories.shape
+    assert num_eps == num_epochs, f"{num_eps} != {num_epochs}"
+    assert num_cls == num_classes, f"{num_cls} != {num_classes}"
+    
+    num_eps, num_ood_ex, num_cls = ood_trajectories.shape
+    assert num_eps == num_epochs, f"{num_eps} != {num_epochs}"
+    assert num_cls == num_classes, f"{num_cls} != {num_classes}"
+    
+    id_trajectories = np.array(id_trajectories).transpose(0, 2, 1).reshape(-1, num_id_ex)
+    ood_trajectories = np.array(ood_trajectories).transpose(0, 2, 1).reshape(-1, num_ood_ex)
+    print(f"!! Reshaped sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories)}")
+
 id_trajectories = np.transpose(np.array(id_trajectories), (1, 0))
 ood_trajectories = np.transpose(np.array(ood_trajectories), (1, 0))
 print(f"ID trajectories: {id_trajectories.shape} / OOD trajectories: {ood_trajectories.shape}")
@@ -383,7 +421,7 @@ print(f"ID trajectories: {id_trajectories.shape} / OOD trajectories: {ood_trajec
 # Plot the trajectories
 trajectories_dict = dict(id=id_trajectories, ood=ood_trajectories)
 label_map_dict = dict(id="ID", ood="OOD")
-output_file = os.path.join(experiment_output_dir, f"loss_trajectories_imagenet_id_vs_ood_{ood_dataset_name}{'_max_logit_traj' if use_max_logit_traj else ''}.png")
+output_file = os.path.join(experiment_output_dir, f"loss_trajectories_imagenet_id_vs_ood_{ood_dataset_name}{trajectory_type}.png")
 y_label = "Loss values"
 
 # Compute the 90th percentile for specifying the y-axis limits
@@ -391,8 +429,10 @@ concatenated_trajs = np.concatenate([trajectories_dict[k] for k in trajectories_
 top_percentile = np.percentile(concatenated_trajs, 90)
 print("90th percentile:", top_percentile)
 y_lim = (0., top_percentile)
-if use_max_logit_traj:
+if trajectory_type == "max-logit":
     y_label = "Max logit"
+elif trajectory_type == "sorted-logit":
+    y_label = "Sorted logit"
 visualize_given_trajectories(trajectories_dict, output_file, y_lim=y_lim, y_label=y_label, label_map_dict=label_map_dict)
 
 # Train the k-NN classifier
@@ -425,7 +465,7 @@ avg_dist_dict = dict()
 max_logit_dict = dict()
 
 for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader]):
-    trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}{'_max_logit' if use_max_logit_traj else ''}_trajectories.pkl")
+    trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}{trajectory_type}_trajectories.pkl")
     if os.path.exists(trajectory_dataset_file):
         print("Loading trajectories from file:", trajectory_dataset_file)
         with open(trajectory_dataset_file, "rb") as f:
@@ -520,6 +560,6 @@ label_dict["Max-Logit"] = label_dict["MAP-D"].copy()
 pred_dict["MAP-D"] = np.concatenate([pred_dict["ID"], pred_dict["OOD"]])
 pred_dict["MAP-D (only ID)"] = np.concatenate([avg_dist_dict["ID"], avg_dist_dict["OOD"]])
 pred_dict["Max-Logit"] = np.concatenate([max_logit_dict["ID"], max_logit_dict["OOD"]])
-output_file = os.path.join(experiment_output_dir, f"auc_imagenet_id_vs_ood_{ood_dataset_name}{'_max_logit_traj' if use_max_logit_traj else ''}.png")
+output_file = os.path.join(experiment_output_dir, f"auc_imagenet_id_vs_ood_{ood_dataset_name}{trajectory_type}.png")
 plot_auc(label_dict, pred_dict, key_list, output_file)
 
