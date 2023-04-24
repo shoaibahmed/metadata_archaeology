@@ -401,18 +401,18 @@ for epoch in range(num_epochs):
 # Convert the loss values into a trajectory
 if trajectory_type == "sorted-logits":
     # Data shape: num epochs x num examples x num classes -> (num epochs x num_classes) x num_examples
-    print(f"!! Reshaping sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories)}")
-    num_eps, num_id_ex, num_cls = id_trajectories.shape
+    print(f"!! Reshaping sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories).shape}")
+    num_eps, num_id_ex, num_cls = np.array(id_trajectories).shape
     assert num_eps == num_epochs, f"{num_eps} != {num_epochs}"
     assert num_cls == num_classes, f"{num_cls} != {num_classes}"
     
-    num_eps, num_ood_ex, num_cls = ood_trajectories.shape
+    num_eps, num_ood_ex, num_cls = np.array(ood_trajectories).shape
     assert num_eps == num_epochs, f"{num_eps} != {num_epochs}"
     assert num_cls == num_classes, f"{num_cls} != {num_classes}"
     
     id_trajectories = np.array(id_trajectories).transpose(0, 2, 1).reshape(-1, num_id_ex)
     ood_trajectories = np.array(ood_trajectories).transpose(0, 2, 1).reshape(-1, num_ood_ex)
-    print(f"!! Reshaped sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories)}")
+    print(f"!! Reshaped sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories).shape}")
 
 id_trajectories = np.transpose(np.array(id_trajectories), (1, 0))
 ood_trajectories = np.transpose(np.array(ood_trajectories), (1, 0))
@@ -502,6 +502,12 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
             current_trajectories.append(current_preds["loss_vals"])
         
         # Convert the loss values into a trajectory
+        if trajectory_type == "sorted-logits":
+            # Data shape: num epochs x num examples x num classes -> (num epochs x num_classes) x num_examples
+            num_eps, num_id_ex, num_cls = np.array(current_trajectories).shape
+            assert num_eps == num_epochs, f"{num_eps} != {num_epochs}"
+            assert num_cls == num_classes, f"{num_cls} != {num_classes}"
+            current_trajectories = np.array(current_trajectories).transpose(0, 2, 1).reshape(-1, num_id_ex)
         current_trajectories = np.transpose(np.array(current_trajectories), (1, 0))
         print(f"Current trajectories: {current_trajectories.shape}")
         
