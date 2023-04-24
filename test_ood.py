@@ -187,13 +187,13 @@ class MaxLogitLoss(torch.nn.Module):
 
 
 class SortedLogitLoss(torch.nn.Module):
-    """Define a custom loss criterion which computes the sorted-logit trajectory"""
+    """Define a custom loss criterion which computes the sorted-logits trajectory"""
     def __init__(self):
         super(SortedLogitLoss, self).__init__()
     
     def forward(self, x, y):
-        sorted_logit = torch.sort(x, dim=1, descending=True)
-        return sorted_logit
+        sorted_logits, sorted_logits_idx = torch.sort(x, dim=1, descending=True)
+        return sorted_logits
 
 
 # In[ ]:
@@ -213,7 +213,7 @@ trajectory_type = "max-logit"
 if len(sys.argv) > 2:
     trajectory_type = sys.argv[2]
     print("Received trajectory type arg:", trajectory_type)
-assert trajectory_type in ["loss", "max-logit", "sorted-logit"]
+assert trajectory_type in ["loss", "max-logit", "sorted-logits"]
 
 
 # In[ ]:
@@ -304,7 +304,7 @@ test_set = ImageFolder(os.path.join(data_dir, "val_folders"), transform=test_tra
 print(f"Performing OOD detection using {trajectory_type} trajectory...")
 if trajectory_type == "max-logit":
     loss_fn = MaxLogitLoss()
-elif trajectory_type == "sorted-logit":
+elif trajectory_type == "sorted-logits":
     loss_fn = SortedLogitLoss()
 else:
     assert trajectory_type == "loss"
@@ -399,7 +399,7 @@ for epoch in range(num_epochs):
     ood_trajectories.append(ood_preds["loss_vals"])
 
 # Convert the loss values into a trajectory
-if trajectory_type == "sorted-logit":
+if trajectory_type == "sorted-logits":
     # Data shape: num epochs x num examples x num classes -> (num epochs x num_classes) x num_examples
     print(f"!! Reshaping sorted logits / ID trajectories: {np.array(id_trajectories).shape} / OOD trajectories: {np.array(ood_trajectories)}")
     num_eps, num_id_ex, num_cls = id_trajectories.shape
@@ -431,8 +431,8 @@ print("90th percentile:", top_percentile)
 y_lim = (0., top_percentile)
 if trajectory_type == "max-logit":
     y_label = "Max logit"
-elif trajectory_type == "sorted-logit":
-    y_label = "Sorted logit"
+elif trajectory_type == "sorted-logits":
+    y_label = "Sorted logits"
 visualize_given_trajectories(trajectories_dict, output_file, y_lim=y_lim, y_label=y_label, label_map_dict=label_map_dict)
 
 # Train the k-NN classifier
