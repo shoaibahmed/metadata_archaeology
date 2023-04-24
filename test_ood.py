@@ -106,7 +106,7 @@ def visualize_given_trajectories(trajectories_dict, output_file, label_map_dict=
     plt.ylabel(y_label, fontsize=font_size)
     plt.xlabel("Epochs", fontsize=font_size)
     plt.ylim(y_lim[0], y_lim[1])
-    plt.xlim(0., 99.)
+    plt.xlim(0., len(mean_traj)-1)
     plt.xticks(fontsize=font_size)
     plt.yticks(fontsize=font_size)
 
@@ -421,7 +421,7 @@ print(f"ID trajectories: {id_trajectories.shape} / OOD trajectories: {ood_trajec
 # Plot the trajectories
 trajectories_dict = dict(id=id_trajectories, ood=ood_trajectories)
 label_map_dict = dict(id="ID", ood="OOD")
-output_file = os.path.join(experiment_output_dir, f"loss_trajectories_imagenet_id_vs_ood_{ood_dataset_name}{trajectory_type}.png")
+output_file = os.path.join(experiment_output_dir, f"loss_trajectories_imagenet_id_vs_ood_{ood_dataset_name}_{trajectory_type}.png")
 y_label = "Loss values"
 
 # Compute the 90th percentile for specifying the y-axis limits
@@ -465,7 +465,7 @@ avg_dist_dict = dict()
 max_logit_dict = dict()
 
 for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader]):
-    trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}{trajectory_type}_trajectories.pkl")
+    trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}_{trajectory_type}_trajectories.pkl")
     if os.path.exists(trajectory_dataset_file):
         print("Loading trajectories from file:", trajectory_dataset_file)
         with open(trajectory_dataset_file, "rb") as f:
@@ -566,6 +566,6 @@ label_dict["Max-Logit"] = label_dict["MAP-D"].copy()
 pred_dict["MAP-D"] = np.concatenate([pred_dict["ID"], pred_dict["OOD"]])
 pred_dict["MAP-D (only ID)"] = np.concatenate([avg_dist_dict["ID"], avg_dist_dict["OOD"]])
 pred_dict["Max-Logit"] = np.concatenate([max_logit_dict["ID"], max_logit_dict["OOD"]])
-output_file = os.path.join(experiment_output_dir, f"auc_imagenet_id_vs_ood_{ood_dataset_name}{trajectory_type}.png")
+output_file = os.path.join(experiment_output_dir, f"auc_imagenet_id_vs_ood_{ood_dataset_name}_{trajectory_type}.png")
 plot_auc(label_dict, pred_dict, key_list, output_file)
 
