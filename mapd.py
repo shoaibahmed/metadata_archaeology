@@ -1724,7 +1724,7 @@ clf.fit(probe_train_x, probe_train_y)
 # In[ ]:
 
 
-def plot_confusion_matrix_from_preds(y_true, y_pred, classes, normalize=False, title=None, cmap=plt.cm.Blues, fontsize=15):
+def plot_confusion_matrix_from_preds(y_true, y_pred, classes, output_file, normalize=False, title=None, cmap=plt.cm.Blues, fontsize=15):
     cm = confusion_matrix(
         y_true,
         y_pred,
@@ -1758,9 +1758,12 @@ def plot_confusion_matrix_from_preds(y_true, y_pred, classes, normalize=False, t
 
     for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
         plt.text(j, i, cm[i, j], horizontalalignment="center", fontsize=fontsize, color="white" if cm[i, j] > thresh else "black", )
-        plt.tight_layout()
-        plt.ylabel('True label', fontsize=fontsize)
-        plt.xlabel('Predicted label', fontsize=fontsize)
+    
+    plt.ylabel('True label', fontsize=fontsize)
+    plt.xlabel('Predicted label', fontsize=fontsize)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
 
 # In[ ]:
@@ -1772,10 +1775,8 @@ for normalize in [False, True]:
     test_acc = (prediction == probe_val_y).astype(np.float32).mean()
     print(f"Evaluation results | Test: {100. * test_acc:.2f}%")
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    plot_confusion_matrix_from_preds(probe_val_y, prediction, main_classes, normalize=normalize)
-    plt.tight_layout()
     output_file = os.path.join(experiment_output_dir, f"probe_confusion_matrix_trajectories_val_probes_{num_example_probes}{'_norm' if normalize else ''}.png")
-    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plot_confusion_matrix_from_preds(probe_val_y, prediction, main_classes, output_file, normalize=normalize)
 
 
 # In[ ]:
