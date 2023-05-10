@@ -454,7 +454,7 @@ for loss_fn in loss_fn_list:
     all_trajectories_random = np.concatenate([id_trajectories, random_ood_trajectories], axis=0)
     print(f"ID trajectories: {id_trajectories.shape} / Random OOD trajectories: {random_ood_trajectories.shape} / All trajectories: {all_trajectories_random.shape}")
     random_clf.fit(all_trajectories_random, all_labels)
-    
+
     # Create the one-class classifier
     oc_clf_neighbors = num_example_probes
     oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
@@ -486,10 +486,25 @@ max_logit_dict = dict()
 
 for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader]):
     trajectory_dataset_file = os.path.join(experiment_output_dir, f"{ood_dataset_name}_{'id' if loader_idx == 0 else 'ood'}_trajectories.pkl")
+    key = key_list[loader_idx]  # Can only be 0 or 1
+    
     if os.path.exists(trajectory_dataset_file):
         print("Loading trajectories from file:", trajectory_dataset_file)
         with open(trajectory_dataset_file, "rb") as f:
-            predictions, random_predictions, avg_dist_dict, max_logits, labels = pickle.load(f)
+            predictions, random_predictions, avg_dists, max_logits, labels = pickle.load(f)
+        
+        max_logit_dict[key] = max_logits
+        label_dict[key] = {}
+        pred_dict[key] = {}
+        random_pred_dict[key] = {}
+        avg_dist_dict[key] = {}
+        
+        for loss_fn in loss_fn_list:
+            label_dict[key][loss_fn] = labels[loss_fn]
+            pred_dict[key][loss_fn] = predictions[loss_fn]
+            random_pred_dict[key][loss_fn] = random_predictions[loss_fn]
+            avg_dist_dict[key][loss_fn] = avg_dists[loss_fn]
+
         print("Files loaded successfully. Skipping computation...")
         continue
     
@@ -575,12 +590,9 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     
     # Collect final stats
     max_logits = np.concatenate(max_logits)
-    labels = np.zeros((len(predictions),), dtype=np.int64) if loader_idx == 0 else np.ones((len(predictions),), dtype=np.int64)
-    
-    key = key_list[loader_idx]  # Can only be 0 or 1
-    label_dict[key] = labels
     max_logit_dict[key] = max_logits
     
+    label_dict[key] = {}
     pred_dict[key] = {}
     random_pred_dict[key] = {}
     avg_dist_dict[key] = {}
@@ -589,6 +601,9 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
         predictions[loss_fn] = np.concatenate(predictions[loss_fn])
         random_predictions[loss_fn] = np.concatenate(random_predictions[loss_fn])
         avg_dists[loss_fn] = np.concatenate(avg_dists[loss_fn])
+        
+        labels = np.zeros((len(predictions[loss_fn]),), dtype=np.int64) if loader_idx == 0 else np.ones((len(predictions[loss_fn]),), dtype=np.int64)
+        label_dict[key][loss_fn] = labels
 
         assert id_pred[loss_fn] == np.sum(predictions[loss_fn] < thresh), id_pred[loss_fn]
         assert ood_pred[loss_fn] == np.sum(predictions[loss_fn] >= thresh), ood_pred[loss_fn]
@@ -603,19 +618,25 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     
     # Write the stats to file
     with open(trajectory_dataset_file, "wb") as f:
-        pickle.dump([predictions, random_predictions, avg_dist_dict, max_logits, labels], f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump([predictions, random_predictions, avg_dists, max_logits, labels], f, protocol=pickle.HIGHEST_PROTOCOL)
     print("Trajectory dataset written to file:", trajectory_dataset_file)
 
+# Plot the RoC curve
+key_list = ["MAP-D", "MAP-D (only ID)", "MAP-D (random input)", "Max-Logit"]
+
 for loss_fn in loss_fn_list:
-    # Plot the RoC curve
-    key_list = ["MAP-D", "MAP-D (only ID)", "MAP-D (random input)", "Max-Logit"]
-    label_dict["MAP-D"] = np.concatenate([label_dict["ID"], label_dict["OOD"]])
+    label_dict["MAP-D"] = np.concatenate([label_dict["ID"][loss_fn], label_dict["OOD"][loss_fn]])
     label_dict["MAP-D (only ID)"] = label_dict["MAP-D"].copy()
+    label_dict["MAP-D (random input)"] = label_dict["MAP-D"].copy()
     label_dict["Max-Logit"] = label_dict["MAP-D"].copy()
+    
     pred_dict["MAP-D"] = np.concatenate([pred_dict["ID"][loss_fn], pred_dict["OOD"][loss_fn]])
     pred_dict["MAP-D (only ID)"] = np.concatenate([avg_dist_dict["ID"][loss_fn], avg_dist_dict["OOD"][loss_fn]])
     pred_dict["MAP-D (random input)"] = np.concatenate([random_pred_dict["ID"][loss_fn], random_pred_dict["OOD"][loss_fn]])
     pred_dict["Max-Logit"] = np.concatenate([max_logit_dict["ID"], max_logit_dict["OOD"]])
+    
+    print(f"Pred shapes / MAP-D: {pred_dict['MAP-D'].shape} / MAP-D (only ID): {pred_dict['MAP-D (only ID)'].shape} / MAP-D (random input): {pred_dict['MAP-D (random input)'].shape} / Max-logit: {pred_dict['Max-Logit'].shape}")
+    print(f"Label shapes / MAP-D: {label_dict['MAP-D'].shape} / MAP-D (only ID): {label_dict['MAP-D (only ID)'].shape} / MAP-D (random input): {label_dict['MAP-D (random input)'].shape} / Max-logit: {label_dict['Max-Logit'].shape}")
     output_file = os.path.join(experiment_output_dir, f"auc_imagenet_id_vs_ood_{ood_dataset_name}_{loss_fn}.png")
     plot_auc(label_dict, pred_dict, key_list, output_file)
 
