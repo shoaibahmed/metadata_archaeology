@@ -453,8 +453,8 @@ for loss_fn in loss_fn_list:
     random_clf = sklearn.neighbors.KNeighborsClassifier(n_neighbors)
     all_trajectories_random = np.concatenate([id_trajectories, random_ood_trajectories], axis=0)
     print(f"ID trajectories: {id_trajectories.shape} / Random OOD trajectories: {random_ood_trajectories.shape} / All trajectories: {all_trajectories_random.shape}")
-    random_clf.fit(all_trajectories, all_labels)
-
+    random_clf.fit(all_trajectories_random, all_labels)
+    
     # Create the one-class classifier
     oc_clf_neighbors = num_example_probes
     oc_clf = sklearn.neighbors.KNeighborsClassifier(oc_clf_neighbors)
@@ -489,7 +489,7 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     if os.path.exists(trajectory_dataset_file):
         print("Loading trajectories from file:", trajectory_dataset_file)
         with open(trajectory_dataset_file, "rb") as f:
-            predictions, avg_dist_dict, max_logits, labels = pickle.load(f)
+            predictions, random_predictions, avg_dist_dict, max_logits, labels = pickle.load(f)
         print("Files loaded successfully. Skipping computation...")
         continue
     
@@ -580,6 +580,10 @@ for loader_idx, loader in enumerate([test_set_sel_loader, ood_dataset_sel_loader
     key = key_list[loader_idx]  # Can only be 0 or 1
     label_dict[key] = labels
     max_logit_dict[key] = max_logits
+    
+    pred_dict[key] = {}
+    random_pred_dict[key] = {}
+    avg_dist_dict[key] = {}
     
     for loss_fn in loss_fn_list:
         predictions[loss_fn] = np.concatenate(predictions[loss_fn])
